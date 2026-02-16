@@ -1,0 +1,33 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+}
+
+/* Base: use Inter and a lighter weight for subtler UI */
+body {
+  @apply bg-gray-900 text-gray-100 font-sans;
+  font-weight: 100;
+  line-height: 0.75;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Headings and strong text slightly bolder but not overly heavy */
+h1, h2, h3, h4, strong, b {
+  font-weight: 500;
+}
+
+.chart-placeholder {
+  background: linear-gradient(180deg,#0b1220 0%, #071021 100%);
+  border: 1px solid rgba(255,255,255,0.04);
+}
+
+/* Make Tailwind's .font-bold less heavy for a subtler UI */
+.font-bold {
+  font-weight: 500 !important;
+}
