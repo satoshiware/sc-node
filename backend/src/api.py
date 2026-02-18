@@ -70,6 +70,8 @@ class OrderResponse(BaseModel):
     amount: str
     total: str
     status: str
+    remaining_quantity: float
+    quantity: float
 
 class PlaceOrderRequest(BaseModel):
     side: str
@@ -104,7 +106,9 @@ def format_order(order_dict):
         priceSats=price_sats,
         amount=amount,
         total=total,
-        status=status.capitalize()
+        status=status.capitalize(),
+        remaining_quantity=order_dict['remaining_quantity'],  # Add this
+        quantity=order_dict['quantity'] 
     )
 
 # WebSocket endpoint for real-time updates
@@ -139,6 +143,7 @@ async def websocket_orders(websocket: WebSocket):
         print(f"WebSocket error: {e}")
 
 # Polling alternative endpoint (fallback)
+# In backend/src/api.py
 @app.get("/api/orders/poll")
 def poll_orders():
     """Poll endpoint for orders (alternative to WebSocket)"""
