@@ -48,3 +48,4 @@ build/
 # Logs
 # =========================
 *.log
+backend/src/.trade_signal
