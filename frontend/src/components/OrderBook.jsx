@@ -74,10 +74,10 @@ export default function OrderBook(){
       }
     })
 
-    // Separate and sort asks (Sell orders, ascending price)
+    // Separate and sort asks (Sell orders, descending price)
     const asksList = parsed
       .filter(o => o.side === 'Sell' && o.price > 0)
-      .sort((a, b) => a.price - b.price)
+      .sort((a, b) => b.price - a.price)
       .slice(0, depth)
 
     // Separate and sort bids (Buy orders, descending price)
