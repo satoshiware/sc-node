@@ -14,6 +14,10 @@ export default function OrdersTable(){
       }
     }
   }, [])
+  const displayPrice = (p) => {
+  if (p == null || p === "0") return "—";
+  return typeof p === 'number' ? p.toLocaleString() : p;
+}
 
   const connectWebSocket = () => {
     try {
@@ -104,7 +108,7 @@ export default function OrdersTable(){
             <div className="text-xs text-gray-200">{o.time}</div>
             <div>{o.type}</div>
             <div>{o.side}</div>
-            <div>{o.priceSats}</div>
+            <div>{displayPrice(o.priceSats)}</div>
             <div>{o.amount}</div>
             <div>{o.total}</div>
             <div className={o.status === 'Open' ? 'text-green-300' : o.status === 'Filled' ? 'text-gray-400' : 'text-yellow-300'}>{o.status}</div>
