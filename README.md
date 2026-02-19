@@ -1,15 +1,3 @@
-# Satoshiware Dashboard 
-
-Quick scaffold to run a Coinbase-style Satoshiware dashboard UI using Vite, React and Tailwind.
-
-Install and run:
-
-```bash
-npm install
-npm run dev
-```
-*******************************************************************************************************
-
 # SC Node
 The SC Node (Sovereign Circle Node) is a low-cost, self-hosted mini-PC setup designed to run basic banking infrastructure (nodes, pools, exchanges, etc.) for its owner and members. Its successful operation depends on a constant connection with a bigger, more complete, node (i.e. “SC Cluster” Node) with technical support readily available. The SC Node only requires a wired ethernet internet connection and nothing more to just work. This repository contains all the resources to program and configure a new SC Node for future Sovereign Circle owners.
 
@@ -136,3 +124,16 @@ USB 3.0+ is highly recommended to shorten install times.
 3. Depending on your OS (Windows, Linux, or even Linux on Windows [WSL]), search for an online guide to correctly write an ISO to a USB drive so that it will boot and install as desired.
 
 *Note: Be sure the target machine has wired internet; otherwise, the setup will prompt for networking configuration during install. It’s recommended the install process has internet access to ensure the most up-to-date Debian install files. Also, the setup.sh script run first boot requires it!*
+
+*******************************************************************************************************
+
+# Satoshiware Dashboard 
+
+Quick scaffold to run a Coinbase-style Satoshiware dashboard UI using Vite, React and Tailwind.
+
+Install and run:
+
+```bash
+npm install
+npm run dev
+```
