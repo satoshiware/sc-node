@@ -1,35 +1,91 @@
-import React from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 
 export default function TradeHistory(){
-  const assetDenom = 'AZC'
-  const trades = [
-    { amount: '0.005', price: '89,167.97', time: '12:34:30', side: 'buy' },
-    { amount: '0.0002', price: '89,167.97', time: '12:34:30', side: 'sell' },
-    { amount: '0.00011', price: '89,161.16', time: '12:34:30', side: 'buy' }
-,   { amount: '0.0025', price: '89,150.00', time: '12:33:50', side: 'sell' },
-    { amount: '0.001', price: '89,145.50', time: '12:33:10', side: 'buy' },
-    { amount: '0.003', price: '89,140.75', time: '12:32:45', side: 'sell' },
-    { amount: '0.0005', price: '89,135.20', time: '12:32:10', side: 'buy' }
-  ]
+  const [trades, setTrades] = useState([])
+  const wsRef = useRef(null)
+  const reconnectRef = useRef(null)
+
+  useEffect(() => {
+    connectWebSocket()
+    return () => {
+      if (wsRef.current) wsRef.current.close()
+      if (reconnectRef.current) clearTimeout(reconnectRef.current)
+    }
+  }, [])
+
+  const connectWebSocket = () => {
+    try {
+      const websocket = new WebSocket('ws://localhost:8000/ws/trades')
+      wsRef.current = websocket
+
+      websocket.onopen = () => {
+        console.log('[TradeHistory] WS connected')
+      }
+
+      websocket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data)
+          if (data.type === 'initial' || data.type === 'update') {
+            // Sort trades: newest first
+            const sortedTrades = (data.trades || []).sort((a, b) => {
+              return new Date(b.time) - new Date(a.time)
+            })
+            setTrades(sortedTrades)
+          }
+        } catch (err) {
+          console.error('[TradeHistory] Parse error:', err)
+        }
+      }
+
+      websocket.onerror = (err) => {
+        console.error('[TradeHistory] WS error:', err)
+      }
+
+      websocket.onclose = () => {
+        console.log('[TradeHistory] WS closed, reconnecting...')
+        reconnectRef.current = setTimeout(connectWebSocket, 2000)
+      }
+    } catch (err) {
+      console.error('[TradeHistory] Connection failed:', err)
+      reconnectRef.current = setTimeout(connectWebSocket, 2000)
+    }
+  }
 
   return (
-    <div className="bg-gray-800 p-3 rounded-md">
-      <div className="text-sm font-medium mb-2">Trade history</div>
-
-      <div className="grid grid-cols-3 text-xs text-gray-400 mb-2 px-1">
-        <div className="text-left">Amount ({assetDenom})</div>
-        <div className="text-center">Price (SATS)</div>
-        <div className="text-center">Time</div>
+    <div className="bg-gray-800 p-3 rounded-md mt-2">
+      <div className="text-xs text-gray-400 mb-2">Trade History</div>
+      
+      <div className="text-xs text-gray-400 grid grid-cols-4 gap-2 border-b border-gray-700 pb-2">
+        <div>Time</div>
+        <div>Price (SATS)</div>
+        <div>Amount (AZC)</div>
       </div>
 
-      <div className="space-y-1 text-sm text-gray-300 max-h-60 overflow-y-auto pr-2">
-        {trades.map((t,i)=> (
-          <div key={i} className="grid grid-cols-3 items-center gap-2">
-            <div className="text-gray-400">{t.amount}</div>
-            <div className={t.side === 'buy' ? 'text-center text-green-400' : 'text-center text-red-400'}>{t.price}</div>
-            <div className="text-gray-500 text-right">{t.time}</div>
-          </div>
-        ))}
+      <div className="mt-2 space-y-1 text-sm max-h-80 overflow-y-auto pr-2">
+        {trades.length === 0 ? (
+          <div className="text-xs text-gray-500 py-4">No trades yet</div>
+        ) : (
+          trades.map((t, i) => {
+            // Extract time HH:MM:SS from full timestamp
+            const timeStr = t.time.split(' ')[1] || t.time
+            
+            // Parse amount from "0.005 AZC" format
+            const amount = t.quantity.replace(' AZC', '')
+            
+            // Determine side color (buy = green, sell = red)
+            const sideColor = t.side === 'buy' 
+              ? 'text-green-400' 
+              : 'text-red-400'
+            
+            return (
+              <div key={t.id || i} className="grid grid-cols-4 gap-2 text-gray-200 items-center py-1 hover:bg-gray-700 px-1 rounded">
+                <div className="text-xs text-gray-300">{timeStr}</div>
+                <div className="font-mono">{t.price}</div>
+                <div className="font-mono">{amount}</div>
+              </div>
+            )
+          })
+        )}
       </div>
     </div>
   )

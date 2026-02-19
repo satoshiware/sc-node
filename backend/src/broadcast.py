@@ -30,29 +30,36 @@ def set_event_loop(loop):
     _event_loop = loop
     print("Event loop registered for broadcast")
 
-async def broadcast_orders_update():
-    """Broadcast current orders to all connected clients"""
+async def broadcast_orders_and_trades():
+    """Broadcast both orders and trades to all connected clients"""
     if _manager is None:
-        print("Warning: Manager not set, cannot broadcast")
         return
     
     try:
-        # Fetch all orders (including filled/partial ones)
+        # Broadcast orders
         orders = get_all_user_orders()
-        # Import here to avoid circular imports
         from api import format_order
         formatted_orders = [format_order(o).dict() for o in orders]
+        
+        # Broadcast trades
+        from trades import get_recent_trades
+        from api import format_trade
+        trades = get_recent_trades(limit=100)
+        formatted_trades = [format_trade(t).dict() for t in trades]
         
         if _manager.active_connections:
             await _manager.broadcast({
                 "type": "update",
-                "orders": formatted_orders
+                "orders": formatted_orders,
+                "trades": formatted_trades
             })
-            print(f"✓ Broadcast: {len(formatted_orders)} orders to {len(_manager.active_connections)} clients")
-        else:
-            print(f"No active connections to broadcast to")
+            print(f"[Broadcast] ✓ Sent {len(formatted_orders)} orders and {len(formatted_trades)} trades")
     except Exception as e:
-        print(f"✗ Error broadcasting orders: {e}")
+        print(f"[Broadcast] ✗ Error broadcasting: {e}")
+
+async def broadcast_orders_update():
+    """Broadcast current orders to all connected clients"""
+    await broadcast_orders_and_trades()
 
 def broadcast_trade(trade_data):
     """

@@ -61,6 +61,22 @@ async def startup_event():
     start_trade_signal_monitor()
 
 # Pydantic models for request/response
+
+from orders import get_open_orders, get_all_user_orders, get_best_bid, get_best_ask, place_order
+
+# Add this new function (create it in orders.py first, see step 2)
+from trades import get_all_trades
+
+# Add this Pydantic model
+class TradeResponse(BaseModel):
+    id: int
+    time: str
+    buy_order_id: int
+    sell_order_id: int
+    price: str
+    quantity: str
+    side: str
+
 class OrderResponse(BaseModel):
     id: int
     time: str
@@ -110,6 +126,83 @@ def format_order(order_dict):
         remaining_quantity=order_dict['remaining_quantity'],  # Add this
         quantity=order_dict['quantity'] 
     )
+
+def format_trade(trade_dict):
+    """Convert database trade to frontend format"""
+    price_sats = f"{trade_dict['price']:,.0f}" if trade_dict['price'] else "0"
+    quantity = f"{trade_dict['quantity']:.8f} AZC"
+    
+    # Use executed_at instead of created_at
+    executed_at = trade_dict.get('executed_at')
+    if isinstance(executed_at, str):
+        dt = datetime.fromisoformat(executed_at)
+    else:
+        dt = executed_at
+    time_str = dt.strftime('%m/%d/%y %H:%M:%S')
+    
+    return TradeResponse(
+        id=trade_dict['id'],
+        time=time_str,
+        buy_order_id=trade_dict['buy_order_id'],
+        sell_order_id=trade_dict['sell_order_id'],
+        price=price_sats,
+        quantity=quantity,
+        side="buy"
+    )
+
+
+# Add this WebSocket endpoint
+@app.websocket("/ws/trades")
+async def websocket_trades(websocket: WebSocket):
+    """WebSocket connection for real-time trade updates"""
+    await manager.connect(websocket)
+    try:
+        # Send initial trades to the client
+        trades = get_all_trades()
+        formatted_trades = [format_trade(t).dict() for t in trades]
+        await websocket.send_json({
+            "type": "initial",
+            "trades": formatted_trades
+        })
+        print(f"Sent {len(formatted_trades)} initial trades")
+        
+        # Keep connection alive
+        while True:
+            data = await websocket.receive_text()
+            if data == "refresh":
+                trades = get_all_trades()
+                formatted_trades = [format_trade(t).dict() for t in trades]
+                await websocket.send_json({
+                    "type": "update",
+                    "trades": formatted_trades
+                })
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+    except Exception as e:
+        manager.disconnect(websocket)
+        print(f"WebSocket error: {e}")
+
+# Add this REST endpoint
+@app.get("/api/trades")
+def get_trades():
+    """Get all trades"""
+    try:
+        trades = get_all_trades()
+        formatted_trades = [format_trade(t) for t in trades]
+        return {"trades": formatted_trades}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Add this polling endpoint
+@app.get("/api/trades/poll")
+def poll_trades():
+    """Poll endpoint for trades (alternative to WebSocket)"""
+    try:
+        trades = get_all_trades()
+        formatted_trades = [format_trade(t) for t in trades]
+        return {"trades": formatted_trades}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # WebSocket endpoint for real-time updates
 @app.websocket("/ws/orders")
