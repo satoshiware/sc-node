@@ -1,6 +1,8 @@
 import React, { useState } from 'react'
 import { FiChevronLeft } from 'react-icons/fi'
 import Profile from './Profile'
+import Deposit from './Deposit'
+import ManageFunds from './ManageFunds'
 
 export default function Wallet({ setView }){
   const [assets] = useState([
@@ -41,8 +43,10 @@ export default function Wallet({ setView }){
             <div className="text-sm text-gray-400">Wallet & balances</div>
           </div>
           <div className="flex items-center gap-3">
-            <button className="bg-blue-600 text-white px-3 py-1 rounded-full text-sm">Deposit</button>
-            <button className="bg-gray-700 text-gray-200 px-3 py-1 rounded-full text-sm">Manage funds</button>
+            {/* <button className="bg-blue-600 text-white px-3 py-1 rounded-full text-sm">Deposit</button> */}
+            <Deposit />
+            {/* <button className="bg-gray-700 text-gray-200 px-3 py-1 rounded-full text-sm">Manage funds</button> */}
+            <ManageFunds />
             <Profile />
           </div>
         </div>

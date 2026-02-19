@@ -2,6 +2,8 @@ import React from 'react'
 import { FiSearch, FiChevronLeft } from 'react-icons/fi'
 import OrdersTable from './OrdersTable'
 import Profile from './Profile'
+import Deposit from './Deposit'
+import ManageFunds from './ManageFunds'
 
 export default function OrderManagement({ setView }){
   return (
@@ -32,8 +34,10 @@ export default function OrderManagement({ setView }){
           </div>
 
           <div className="flex items-center gap-3">
-            <button className="bg-blue-600 text-white px-3 py-1 rounded-full text-sm">Deposit</button>
-            <button className="bg-gray-700 text-gray-200 px-3 py-1 rounded-full text-sm">Manage funds</button>
+            {/* <button className="bg-blue-600 text-white px-3 py-1 rounded-full text-sm">Deposit</button> */}
+            <Deposit /> 
+            <ManageFunds />
+            
             <Profile />
           </div>
         </div>
