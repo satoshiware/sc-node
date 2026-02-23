@@ -117,3 +117,22 @@ def get_best_ask():
     row = cur.fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def get_order_by_id(order_id):
+    """Get a single order by id"""
+    if order_id is None:
+        return None
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT *
+        FROM orders
+        WHERE id = ?
+        """,
+        (order_id,)
+    )
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None

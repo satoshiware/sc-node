@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
 import asyncio
 import json
-from orders import get_open_orders, get_best_bid, get_best_ask, place_order,get_all_user_orders
+from orders import get_open_orders, get_best_bid, get_best_ask, place_order, get_all_user_orders, get_order_by_id
 from pydantic import BaseModel
 
 app = FastAPI()
@@ -140,6 +140,40 @@ def format_trade(trade_dict):
         dt = executed_at
     time_str = dt.strftime('%m/%d/%y %H:%M:%S')
     
+    # Determine side (taker) by comparing order creation times
+    # The order created later (closer to trade execution) is the taker
+    side = 'buy'  # default
+    try:
+        buy_order = get_order_by_id(trade_dict.get('buy_order_id'))
+        sell_order = get_order_by_id(trade_dict.get('sell_order_id'))
+        
+        if buy_order and sell_order:
+            # Parse created_at timestamps
+            def parse_datetime(val):
+                if val is None:
+                    return None
+                if isinstance(val, str):
+                    try:
+                        return datetime.fromisoformat(val)
+                    except Exception:
+                        return None
+                return val
+            
+            buy_created = parse_datetime(buy_order.get('created_at'))
+            sell_created = parse_datetime(sell_order.get('created_at'))
+            
+            if buy_created and sell_created:
+                # The order created later is the taker
+                side = 'buy' if buy_created > sell_created else 'sell'
+            else:
+                side = 'buy'
+        elif buy_order:
+            side = 'buy'
+        elif sell_order:
+            side = 'sell'
+    except Exception:
+        side = 'buy'
+    
     return TradeResponse(
         id=trade_dict['id'],
         time=time_str,
@@ -147,7 +181,7 @@ def format_trade(trade_dict):
         sell_order_id=trade_dict['sell_order_id'],
         price=price_sats,
         quantity=quantity,
-        side="buy"
+        side=side
     )
 
 

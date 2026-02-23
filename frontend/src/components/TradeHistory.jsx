@@ -80,7 +80,7 @@ export default function TradeHistory(){
             return (
               <div key={t.id || i} className="grid grid-cols-4 gap-2 text-gray-200 items-center py-1 hover:bg-gray-700 px-1 rounded">
                 <div className="text-xs text-gray-300">{timeStr}</div>
-                <div className="font-mono">{t.price}</div>
+                <div className={`font-mono ${sideColor}`}>{t.price}</div>
                 <div className="font-mono">{amount}</div>
               </div>
             )
