@@ -66,83 +66,130 @@ export default function DepthChart({ lastPrice = null, wsUrl = "ws://localhost:8
 
   // compute chart data
   const { data, totals, midPrice, xTicks, yTicks } = useMemo(() => {
-    const limitOrders = (orders || []).filter(
-      (o) =>
-        o &&
-        o.type === "Limit" &&
-        Number(o.remaining_quantity) > 0 &&
-        (o.status === "Open" || o.status === "Partial")
-    );
+    const limitPct = 0.25; // +/- window fraction
 
-    const parsed = limitOrders
+    // parse & filter orders
+    const parsedOrders = (orders || [])
+      .filter(
+        (o) =>
+          o &&
+          o.type === "Limit" &&
+          Number(o.remaining_quantity) > 0 &&
+          (o.status === "Open" || o.status === "Partial")
+      )
       .map((o) => {
-        const price = o.priceSats != null ? Number(o.priceSats) : null;
-        const amount = Number(o.remaining_quantity) || 0;
-        const side = o.side;
-        return { price, amount, side };
+        const price =
+          o.priceSats != null ? parseInt(String(o.priceSats).replace(/,/g, ""), 10) : null;
+        return { price, amount: Number(o.remaining_quantity) || 0, side: o.side };
       })
-      .filter((p) => p.price != null && p.amount > 0);
+      .filter((p) => p.price > 0 && p.amount > 0);
 
-    const bidsRaw = parsed.filter((p) => p.side === "Buy");
-    const asksRaw = parsed.filter((p) => p.side === "Sell");
+    // aggregate by exact price first
+    const bidsByPrice = aggregateByPrice(parsedOrders.filter((p) => p.side === "Buy").map(p => ({ price: p.price, amount: p.amount })));
+    const asksByPrice = aggregateByPrice(parsedOrders.filter((p) => p.side === "Sell").map(p => ({ price: p.price, amount: p.amount })));
+    // sort
+    const aggBids = bidsByPrice.sort((a, b) => b.price - a.price);
+    const aggAsks = asksByPrice.sort((a, b) => a.price - b.price);
 
-    const aggBids = aggregateByPrice(bidsRaw).sort((a, b) => b.price - a.price);
-    const aggAsks = aggregateByPrice(asksRaw).sort((a, b) => a.price - b.price);
-
-    // cumulative sums
-    let cum = 0;
-    const bidsCum = aggBids
-      .map((b) => ({ ...b, cumulative: (cum += b.amount) }))
-      .slice(0, depth);
-    cum = 0;
-    const asksCum = aggAsks
-      .map((a) => ({ ...a, cumulative: (cum += a.amount) }))
-      .slice(0, depth);
-
-    // merge for Recharts
-    const chartData = [
-      ...bidsCum
-        .map((b) => ({ price: b.price, bids: b.cumulative, asks: 0 }))
-        .reverse(), // so lowest bid is leftmost
-      ...asksCum.map((a) => ({ price: a.price, bids: 0, asks: a.cumulative })),
-    ];
-
-    const totalBidAmount = bidsCum.length ? bidsCum[bidsCum.length - 1].cumulative : 0;
-    const totalAskAmount = asksCum.length ? asksCum[asksCum.length - 1].cumulative : 0;
-    const totalBidCost = bidsCum.reduce((s, x) => s + x.price * x.amount, 0);
-    const totalAskCost = asksCum.reduce((s, x) => s + x.price * x.amount, 0);
-
+    // compute best bid/ask and mid (prefer best bid/ask; fallback to lastPrice)
     const bestBid = aggBids.length ? aggBids[0].price : null;
     const bestAsk = aggAsks.length ? aggAsks[0].price : null;
-    const midPrice =
-      bestBid != null && bestAsk != null
-        ? (bestBid + bestAsk) / 2
-        : lastPrice ?? (bestBid ?? bestAsk);
+    const computedMid =
+      bestBid != null && bestAsk != null ? (bestBid + bestAsk) / 2 : (lastPrice ?? bestBid ?? bestAsk ?? null);
 
-    // y-axis ticks
-    const maxY = chartData.reduce((m, d) => Math.max(m, d.bids, d.asks), 1);
-    const exponent = Math.floor(Math.log10(Math.max(1, maxY)));
-    const yStep = Math.max(1, Math.pow(10, Math.max(0, exponent - 1)));
-    const yTicks = [];
-    for (let v = 0; v <= Math.ceil(maxY / yStep) * yStep; v += yStep) yTicks.push(v);
-
-    // x-axis sample
-    const prices = chartData.map((d) => d.price);
-    const sample = Math.min(8, prices.length || 1);
-    const xTicks = [];
-    if (prices.length > 0) {
-      for (let i = 0; i < sample; i++) {
-        const idx = Math.floor(i * (prices.length - 1) / (sample - 1 || 1));
-        xTicks.push(prices[idx]);
-      }
+    // windowing around mid if available
+    const mid = computedMid != null ? Number(computedMid) : null;
+    let windowMin = null;
+    let windowMax = null;
+    if (mid) {
+      windowMin = Math.max(1, Math.floor(mid * (1 - limitPct)));
+      windowMax = Math.ceil(mid * (1 + limitPct));
     }
 
+    // dynamic bucket sizing to avoid extremely dense X axis
+    const bucketSize = mid ? Math.max(1, Math.round(mid * 0.001)) : 1;
+
+    // bucket and aggregate into map {price -> {price, bid, ask}}
+    const mapAgg = new Map();
+    for (const { price, amount, side } of parsedOrders) {
+      if (price == null) continue;
+      if (mid && (price < windowMin || price > windowMax)) continue; // apply window
+      const bucketPrice = Math.round(price / bucketSize) * bucketSize;
+      const key = bucketPrice;
+      const entry = mapAgg.get(key) || { price: key, bid: 0, ask: 0 };
+      if (side === "Buy") entry.bid += amount;
+      else entry.ask += amount;
+      mapAgg.set(key, entry);
+    }
+
+    const aggList = Array.from(mapAgg.values());
+    const finalBids = aggList
+      .filter((x) => x.bid > 0)
+      .map((x) => ({ price: x.price, amount: x.bid }))
+      .sort((a, b) => b.price - a.price);
+    const finalAsks = aggList
+      .filter((x) => x.ask > 0)
+      .map((x) => ({ price: x.price, amount: x.ask }))
+      .sort((a, b) => a.price - b.price);
+
+    // build price list (ascending)
+    let prices = Array.from(new Set([...finalAsks.map((a) => a.price), ...finalBids.map((b) => b.price)]));
+    prices.sort((a, b) => a - b);
+
+    // fallback: if window filtered everything, include top N of each side (no window)
+    if (prices.length === 0) {
+      const fallbackBids = bidsByPrice.sort((a,b)=>b.price-a.price).slice(0, depth).map(x=>x.price);
+      const fallbackAsks = asksByPrice.sort((a,b)=>a.price-b.price).slice(0, depth).map(x=>x.price);
+      prices = Array.from(new Set([...fallbackAsks, ...fallbackBids])).sort((a,b)=>a-b);
+    }
+
+    // ensure data is dense enough but not excessively so: generate evenly spaced xTicks across min/max
+    const minPrice = prices.length ? prices[0] : (mid || 0);
+    const maxPrice = prices.length ? prices[prices.length - 1] : (mid || 0);
+    const priceRange = Math.max(1, maxPrice - minPrice);
+    const sampleCount = Math.min(8, Math.max(2, Math.floor(prices.length / Math.ceil(bucketSize / Math.max(1, Math.round(mid ? mid/100000 : 1))))));
+
+    // create xTicks as linear samples across range (guarantees evenly spaced axis)
+    const xTicksArr = [];
+    const ticks = Math.min(8, Math.max(2, Math.ceil(prices.length / Math.max(1, Math.floor(prices.length / 8)))));
+    const step = Math.max(1, Math.floor(priceRange / (ticks - 1 || 1)));
+    for (let v = minPrice; v <= maxPrice; v += step) xTicksArr.push(v);
+    // ensure last tick is maxPrice
+    if (xTicksArr[xTicksArr.length - 1] !== maxPrice) xTicksArr.push(maxPrice);
+
+    // cumulative helpers
+    function cumBidAt(p) {
+      let s = 0;
+      for (const it of finalBids) if (it.price >= p) s += it.amount;
+      return s;
+    }
+    function cumAskAt(p) {
+      let s = 0;
+      for (const it of finalAsks) if (it.price <= p) s += it.amount;
+      return s;
+    }
+
+    // build data points by using the explicit prices array (keeps ordering consistent)
+    const dataPoints = prices.map((p) => ({ price: p, bids: cumBidAt(p), asks: cumAskAt(p) }));
+
+    // totals & y ticks
+    const totalBidAmount = finalBids.reduce((s, x) => s + x.amount, 0);
+    const totalAskAmount = finalAsks.reduce((s, x) => s + x.amount, 0);
+    const totalCost =
+      finalBids.reduce((s, x) => s + x.price * x.amount, 0) + finalAsks.reduce((s, x) => s + x.price * x.amount, 0);
+
+    const maxY = dataPoints.reduce((m, d) => Math.max(m, d.bids, d.asks), 1);
+    const exponent = Math.floor(Math.log10(Math.max(1, maxY)));
+    const yStep = Math.max(1, Math.pow(10, Math.max(0, exponent - 1)));
+    const yTicksArr = [];
+    for (let v = 0; v <= Math.ceil(maxY / yStep) * yStep; v += yStep) yTicksArr.push(v);
+
     return {
-      data: chartData,
-      totals: { totalBidAmount, totalAskAmount, totalCost: totalBidCost + totalAskCost },
-      midPrice,
-      xTicks,
-      yTicks,
+      data: dataPoints,
+      totals: { totalBidAmount, totalAskAmount, totalCost },
+      midPrice: mid,
+      xTicks: xTicksArr,
+      yTicks: yTicksArr,
     };
   }, [orders, lastPrice, depth]);
 

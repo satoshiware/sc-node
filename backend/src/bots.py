@@ -21,8 +21,8 @@ def bot(name,work):
         order_type = random.choices(["limit", "market"], weights=[0.8, 0.2])[0]
         price = None
         if order_type == "limit":
-            mid = 100.0
-            price = round(mid + random.uniform(-2.0, 2.0), 2)
+            mid = 6432
+            price = round(mid + random.uniform(-800.0, 800.0), 2)
         quantity = round(random.uniform(0.5, 3.0), 4)
 
         try:
