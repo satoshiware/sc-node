@@ -60,7 +60,7 @@ export default function Header() {
       <div className="flex flex-wrap gap-4 text-sm">
         <div className="flex items-center gap-2">
           <span className="text-gray-400">Last Price:</span>
-          <span className="font-semibold text-green-400">
+          <span className="font-semibold text-lg">
             {stats.last_price ? nf(stats.last_price, { maximumFractionDigits: 2 }) : "—"}
           </span>
           {changeStr && (

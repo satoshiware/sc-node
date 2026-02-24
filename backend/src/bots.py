@@ -31,7 +31,7 @@ def bot(name,work):
         except Exception as e:
             print(f"[{name}] error placing order: {e}")
 
-        time.sleep(random.uniform(0.1, 0.5))
+        time.sleep(random.uniform(2, 3))
 
 if __name__ == "__main__":
     t1 = threading.Thread(target=bot, args=("Buyer", "buy"), daemon=True)
