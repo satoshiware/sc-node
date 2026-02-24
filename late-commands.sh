@@ -33,7 +33,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/root/sc_node/firstboot.sh
+ExecStart=/root/sc-node/firstboot.sh
 RemainAfterExit=true
 StandardOutput=journal+console
 StandardError=journal+console
