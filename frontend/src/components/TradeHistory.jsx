@@ -53,7 +53,7 @@ export default function TradeHistory(){
 
   return (
     <div className="bg-gray-800 p-3 rounded-md">
-      <div className="text-xs text-gray-400 font-medium mb-2">Trade History</div>
+      <div className="text-sm font-medium mb-2">Trade History</div>
       
       <div className="text-xs text-gray-400 grid grid-cols-4 gap-2 border-b border-gray-700 pb-2">
         <div>Time</div>

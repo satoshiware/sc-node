@@ -109,7 +109,7 @@ export default function OrderBook(){
         </div>
       </div>
 
-      <div className="grid grid-cols-2 text-xs text-gray-400 mb-2 px-1">
+      <div className="grid grid-cols-2 text-xs text-gray-400 mb-2 px-1 border-b border-gray-700 pb-2">
         <div>Amount (AZC)</div>
         <div className="text-right">Price (SATS)</div>
       </div>
