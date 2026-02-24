@@ -52,8 +52,8 @@ export default function TradeHistory(){
   }
 
   return (
-    <div className="bg-gray-800 p-3 rounded-md mt-2">
-      <div className="text-xs text-gray-400 mb-2">Trade History</div>
+    <div className="bg-gray-800 p-3 rounded-md">
+      <div className="text-xs text-gray-400 font-medium mb-2">Trade History</div>
       
       <div className="text-xs text-gray-400 grid grid-cols-4 gap-2 border-b border-gray-700 pb-2">
         <div>Time</div>
@@ -61,7 +61,7 @@ export default function TradeHistory(){
         <div>Amount (AZC)</div>
       </div>
 
-      <div className="mt-2 space-y-1 text-sm max-h-80 overflow-y-auto pr-2">
+      <div className="mt-2 space-y-1 text-sm max-h-96 overflow-y-auto pr-2">
         {trades.length === 0 ? (
           <div className="text-xs text-gray-500 py-4">No trades yet</div>
         ) : (
