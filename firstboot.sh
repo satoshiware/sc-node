@@ -13,7 +13,7 @@
 set -euo pipefail
 
 FIRSTBOOT_LOG="/var/log/firstboot.log"
-SETUP_SCRIPT="/root/sc_node/setup.sh"
+SETUP_SCRIPT="/root/sc-node/setup.sh"
 
 echo "firstboot.sh started at $(date)" >> "$FIRSTBOOT_LOG" 2>&1
 # =============================================================================
