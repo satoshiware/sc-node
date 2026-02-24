@@ -6,6 +6,7 @@ import asyncio
 import json
 from orders import get_open_orders, get_best_bid, get_best_ask, place_order, get_all_user_orders, get_order_by_id
 from pydantic import BaseModel
+from market_stats import get_market_stats  # This should return a dict of stats
 
 app = FastAPI()
 
@@ -337,3 +338,40 @@ async def create_order(order: PlaceOrderRequest):
 def health_check():
     """Health check endpoint"""
     return {"status": "ok"}
+
+# Add a connection manager for stats
+class StatsConnectionManager:
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, stats):
+        for ws in self.active_connections:
+            try:
+                await ws.send_json({"type": "market_stats", "stats": stats})
+            except Exception:
+                self.disconnect(ws)
+
+stats_manager = StatsConnectionManager()
+
+@app.websocket("/ws/market_stats")
+async def websocket_market_stats(websocket: WebSocket):
+    await stats_manager.connect(websocket)
+    try:
+        # Send initial stats
+        stats = get_market_stats()
+        await websocket.send_json({"type": "market_stats", "stats": stats})
+        # Keep connection alive and send updates every 2 seconds
+        while True:
+            await asyncio.sleep(2)
+            stats = get_market_stats()
+            await websocket.send_json({"type": "market_stats", "stats": stats})
+    except WebSocketDisconnect:
+        stats_manager.disconnect(websocket)
