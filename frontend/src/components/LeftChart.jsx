@@ -15,220 +15,274 @@ import 'chartjs-adapter-date-fns'
 import { CandlestickController, CandlestickElement } from 'chartjs-chart-financial'
 import DepthChart from './DepthChart'
 
-ChartJS.register(CategoryScale, LinearScale, LinearScaleAlias, TimeScale, Tooltip, Legend, BarElement, BarController, CandlestickController, CandlestickElement)
+ChartJS.register(
+  CategoryScale,
+  LinearScale,
+  LinearScaleAlias,
+  TimeScale,
+  Tooltip,
+  Legend,
+  BarElement,
+  BarController,
+  CandlestickController,
+  CandlestickElement
+)
 
-export default function LeftChart(){
-  const [candleData, setCandleData] = useState(null)
-  const [volumeData, setVolumeData] = useState(null)
-  const [loading, setLoading] = useState(true)
-  const [activeView, setActiveView] = useState('price') // 'price' or 'depth'
-  const liveRef = useRef(null)
+const MAX_CANDLES = 240
 
-  useEffect(()=>{
-    let mounted = true
+export default function LeftChart() {
+  const [candleData, setCandleData]   = useState(null)
+  const [volumeData, setVolumeData]   = useState(null)
+  const [loading, setLoading]         = useState(true)
+  const [activeView, setActiveView]   = useState('price') // 'price' | 'depth'
+  const wsRef       = useRef(null)
+  const reconnectRef = useRef(null)
 
-    async function fetchInitial(){
-      try{
-        // Fetch OHLC (candles) and volumes from CoinGecko
-        const ohlcRes = await fetch('https://api.coingecko.com/api/v3/coins/bitcoin/ohlc?vs_currency=usd&days=1')
-        const marketRes = await fetch('https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=1')
-        const ohlcJson = await ohlcRes.json()
-        const marketJson = await marketRes.json()
-
-        if(!mounted) return
-
-        // ohlcJson: [[ts, o, h, l, c], ...]
-        const candles = ohlcJson.map(c => ({ x: c[0], o: c[1], h: c[2], l: c[3], c: c[4] }))
-        // volumes: marketJson.total_volumes -> [[ts, vol], ...]
-        const vols = (marketJson.total_volumes || []).map(v => ({ t: v[0], v: v[1] }))
-
-        // match volumes to candles by nearest timestamp
-        const candleVolumes = candles.map(c => {
-          let best = 0
-          let bestDiff = Infinity
-          for(const vv of vols){
-            const diff = Math.abs(vv.t - c.x)
-            if(diff < bestDiff){ bestDiff = diff; best = vv.v }
-          }
-          return best
-        })
-
-        // style candles to be tall & slim and give wicks/borders suitable for a dark theme
-        setCandleData({ datasets: [{
-          label: 'Candles',
-          data: candles,
-          // control visual width of candles
-          maxBarThickness: 10,
-          barPercentage: 0.45,
-          categoryPercentage: 0.6,
-          // provide per-point border color so up/down bars match darker theme
-          borderColor: candles.map(c => (c.c >= c.o ? '#064e3b' : '#7f1d1d')),
-          borderWidth: 1
-        }] })
-
-        // volume bars colored according to candle direction (green for up, red for down)
-        setVolumeData({ datasets: [{
-          label: 'Volume',
-          data: candles.map((c,i)=> ({ x: c.x, y: candleVolumes[i] })),
-          backgroundColor: candles.map(c => (c.c >= c.o ? 'rgba(16,185,129,0.9)' : 'rgba(239,68,68,0.9)')),
-          borderSkipped: false
-        }] })
-        setLoading(false)
-
-        // establish websocket to Binance for real-time trade ticks (price + qty)
-        let ws = null
-        let reconnectAttempt = 0
-        const connectWS = () => {
-          try{
-            ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@trade')
-            ws.onopen = () => { reconnectAttempt = 0 }
-            ws.onmessage = (ev) => {
-              try{
-                const msg = JSON.parse(ev.data)
-                const price = Number(msg.p)
-                const ts = msg.T
-                const qty = msg.q ? Number(msg.q) : 0
-                if(price && mounted){
-                  const t = ts
-                  // append/update last candle
-                  setCandleData(prev => {
-                    if(!prev) return prev
-                    const data = [...prev.datasets[0].data]
-                    const last = data[data.length-1]
-                    const minute = 60 * 1000
-                    if(last && Math.abs(last.x - t) < minute){
-                      // update existing last candle
-                      const updated = {...last}
-                      updated.h = Math.max(updated.h, price)
-                      updated.l = Math.min(updated.l, price)
-                      updated.c = price
-                      data[data.length-1] = updated
-                    } else {
-                      // push a new small candle
-                      data.push({ x: t, o: price, h: price, l: price, c: price })
-                    }
-                    const maxLen = 240
-                    if(data.length > maxLen) data.splice(0, data.length - maxLen)
-                    return {...prev, datasets: [{...prev.datasets[0], data}]}
-                  })
-
-                  setVolumeData(prev => {
-                    if(!prev) return prev
-                    const data = [...prev.datasets[0].data]
-                    const last = data[data.length-1]
-                    const minute = 60 * 1000
-                    if(last && Math.abs(last.x - ts) < minute){
-                      data[data.length-1] = {...last, y: last.y + qty}
-                    } else {
-                      data.push({ x: ts, y: qty })
-                    }
-                    const maxLen = 240
-                    if(data.length > maxLen) data.splice(0, data.length - maxLen)
-                    return {...prev, datasets: [{...prev.datasets[0], data}]}
-                  })
-                }
-              }catch(e){ }
-            }
-            ws.onclose = () => { if(!mounted) return; reconnectAttempt += 1; const delay = Math.min(30000, 1000 * (reconnectAttempt + 1)); setTimeout(()=> connectWS(), delay) }
-            ws.onerror = () => { try{ ws.close() }catch(e){} }
-          }catch(e){ reconnectAttempt += 1; const delay = Math.min(30000, 1000 * (reconnectAttempt + 1)); setTimeout(()=> connectWS(), delay) }
-        }
-        connectWS()
-        liveRef.current = { close: () => { try{ ws && ws.close() }catch(e){} } }
-
-      }catch(e){
-        console.error('chart load error', e)
-      }
-    }
-
-    fetchInitial()
-
-    return ()=>{
-      mounted = false
-      if(liveRef.current && typeof liveRef.current.close === 'function'){
-        try{ liveRef.current.close() }catch(e){}
-      }
+  useEffect(() => {
+    connectWebSocket()
+    return () => {
+      if (wsRef.current)    wsRef.current.close()
+      if (reconnectRef.current) clearTimeout(reconnectRef.current)
     }
   }, [])
+
+  function buildChartDatasets(candles) {
+    // candles: [{time, open, high, low, close, volume}, ...]
+    const candleDs = candles.map(c => ({
+      x: new Date(c.time).getTime(),
+      o: c.open,
+      h: c.high,
+      l: c.low,
+      c: c.close,
+    }))
+    const volDs = candles.map(c => ({
+      x: new Date(c.time).getTime(),
+      y: c.volume,
+    }))
+    const candleColors = candles.map(c =>
+      c.close >= c.open ? '#064e3b' : '#7f1d1d'
+    )
+    const volColors = candles.map(c =>
+      c.close >= c.open ? 'rgba(16,185,129,0.9)' : 'rgba(239,68,68,0.9)'
+    )
+
+    setCandleData({
+      datasets: [{
+        label: 'Candles',
+        data: candleDs,
+        maxBarThickness: 10,
+        barPercentage: 0.45,
+        categoryPercentage: 0.6,
+        borderColor: candleColors,
+        borderWidth: 1,
+      }]
+    })
+    setVolumeData({
+      datasets: [{
+        label: 'Volume',
+        data: volDs,
+        backgroundColor: volColors,
+        borderSkipped: false,
+      }]
+    })
+  }
+
+  function applyUpdate(candle) {
+    const ts = new Date(candle.time).getTime()
+
+    setCandleData(prev => {
+      if (!prev) return prev
+      const data = [...prev.datasets[0].data]
+      const last = data[data.length - 1]
+      const isGreen = candle.close >= candle.open
+      const borderColor = [...(prev.datasets[0].borderColor || [])]
+
+      if (last && last.x === ts) {
+        // mutate current candle in place
+        data[data.length - 1] = { x: ts, o: candle.open, h: candle.high, l: candle.low, c: candle.close }
+        borderColor[borderColor.length - 1] = isGreen ? '#064e3b' : '#7f1d1d'
+      } else {
+        // new candle
+        data.push({ x: ts, o: candle.open, h: candle.high, l: candle.low, c: candle.close })
+        borderColor.push(isGreen ? '#064e3b' : '#7f1d1d')
+        if (data.length > MAX_CANDLES) { data.splice(0, data.length - MAX_CANDLES); borderColor.splice(0, borderColor.length - MAX_CANDLES) }
+      }
+      return { ...prev, datasets: [{ ...prev.datasets[0], data, borderColor }] }
+    })
+
+    setVolumeData(prev => {
+      if (!prev) return prev
+      const data = [...prev.datasets[0].data]
+      const bg   = [...(prev.datasets[0].backgroundColor || [])]
+      const last = data[data.length - 1]
+      const color = candle.close >= candle.open ? 'rgba(16,185,129,0.9)' : 'rgba(239,68,68,0.9)'
+
+      if (last && last.x === ts) {
+        data[data.length - 1] = { x: ts, y: candle.volume }
+        bg[bg.length - 1] = color
+      } else {
+        data.push({ x: ts, y: candle.volume })
+        bg.push(color)
+        if (data.length > MAX_CANDLES) { data.splice(0, data.length - MAX_CANDLES); bg.splice(0, bg.length - MAX_CANDLES) }
+      }
+      return { ...prev, datasets: [{ ...prev.datasets[0], data, backgroundColor: bg }] }
+    })
+  }
+
+  function connectWebSocket() {
+    const wsUrl = import.meta.env.VITE_WS_URL || 'ws://localhost:8000'
+    try {
+      const ws = new WebSocket(`${wsUrl}/ws/candles`)
+      wsRef.current = ws
+
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data)
+
+          if (msg.type === 'initial') {
+            const candles = msg.candles || []
+            if (candles.length) {
+              buildChartDatasets(candles)
+              setLoading(false)
+            }
+          }
+
+          if (msg.type === 'candle_update') {
+            applyUpdate(msg.candle)
+            setLoading(false)
+          }
+
+          if (msg.type === 'candle_close') {
+            // candle_close just signals the window rolled;
+            // candle_update will follow immediately with the new candle.
+            console.debug('[LeftChart] candle closed:', msg.candle?.time)
+          }
+        } catch (e) {
+          // ignore parse errors
+        }
+      }
+
+      ws.onerror = () => ws.close()
+      ws.onclose = () => {
+        reconnectRef.current = setTimeout(connectWebSocket, 2000)
+      }
+    } catch (e) {
+      reconnectRef.current = setTimeout(connectWebSocket, 2000)
+    }
+  }
+
+  // last close price for DepthChart midPrice prop
+  const lastPrice = (() => {
+    if (!candleData) return null
+    const data = candleData.datasets[0].data
+    const last = data[data.length - 1]
+    return last ? last.c : null
+  })()
 
   const options = {
     responsive: true,
     maintainAspectRatio: false,
     elements: {
-      // candlestick element styling (chartjs-chart-financial uses element id 'candlestick')
       candlestick: {
         wickColor: '#374151',
         wickWidth: 1.2,
-        borderWidth: 1.2
+        borderWidth: 1.2,
       }
     },
     scales: {
       x: {
         type: 'time',
-        time: { unit: 'minute' },
-        ticks: { color: '#9CA3AF' },
-        grid: { color: 'rgba(255,255,255,0.03)' }
+        time: { unit: 'second', displayFormats: { second: 'HH:mm:ss' } },
+        ticks: { color: '#9CA3AF', maxTicksLimit: 8 },
+        grid: { color: 'rgba(255,255,255,0.03)' },
       },
       y: {
         display: true,
         ticks: { color: '#9CA3AF' },
         position: 'right',
-        grid: { color: 'rgba(255,255,255,0.03)' }
+        grid: { color: 'rgba(255,255,255,0.03)' },
       }
     },
     plugins: {
       legend: { display: false },
-      tooltip: { mode: 'index', intersect: false }
-    }
+      tooltip: { mode: 'index', intersect: false },
+    },
+    animation: false,
   }
 
   const volOptions = {
     responsive: true,
     maintainAspectRatio: false,
     scales: {
-      x: { type: 'time', time: { unit: 'minute' }, ticks: { color: '#9CA3AF' } },
-      y: { display: true, ticks: { color: '#9CA3AF' }, position: 'left' }
+      x: {
+        type: 'time',
+        time: { unit: 'second', displayFormats: { second: 'HH:mm:ss' } },
+        ticks: { color: '#9CA3AF', maxTicksLimit: 8 },
+      },
+      y: {
+        display: true,
+        ticks: { color: '#9CA3AF' },
+        position: 'left',
+      }
     },
-    plugins: { legend: { display: false } }
+    plugins: { legend: { display: false } },
+    animation: false,
   }
 
   return (
     <div className="chart-placeholder rounded-md p-4 min-h-[360px]">
       <div className="flex items-center justify-between">
         <div className="flex items-center space-x-2">
-          <button onClick={()=>setActiveView('price')} className={`px-3 py-1 rounded ${activeView==='price' ? 'bg-gray-700 text-white' : 'text-gray-400'}`}>Price chart</button>
-          <button onClick={()=>setActiveView('depth')} className={`px-3 py-1 rounded ${activeView==='depth' ? 'bg-gray-700 text-white' : 'text-gray-400'}`}>Depth chart</button>
+          <button
+            onClick={() => setActiveView('price')}
+            className={`px-3 py-1 rounded ${activeView === 'price' ? 'bg-gray-700 text-white' : 'text-gray-400'}`}
+          >
+            Price chart
+          </button>
+          <button
+            onClick={() => setActiveView('depth')}
+            className={`px-3 py-1 rounded ${activeView === 'depth' ? 'bg-gray-700 text-white' : 'text-gray-400'}`}
+          >
+            Depth chart
+          </button>
         </div>
-        <div className="text-sm text-gray-400">VOL 741.23</div>
+        <div className="text-sm text-gray-400">
+          {lastPrice ? `Last: ${lastPrice.toLocaleString()}` : 'Waiting for trades…'}
+        </div>
       </div>
 
       <div className="mt-6 bg-transparent rounded-md">
+        {/* Main chart area */}
         <div className="h-72">
-          {loading && <div className="flex items-center justify-center h-full text-gray-400">Loading chart…</div>}
+          {loading && (
+            <div className="flex items-center justify-center h-full text-gray-400">
+              Waiting for trades…
+            </div>
+          )}
+
+          {/* Price chart (candlestick) */}
           {!loading && activeView === 'price' && candleData && (
             <Chart type="candlestick" data={candleData} options={options} />
           )}
-          {!loading && activeView === 'depth' && candleData && (
-            (() => {
-              const last = candleData.datasets[0].data[candleData.datasets[0].data.length - 1]
-              const lastPrice = last && (last.c || last.o || last.h || last.l) ? (last.c || last.o || last.h || last.l) : 1000
-              return <DepthChart lastPrice={lastPrice} />
-            })()
+
+          {/* Depth chart */}
+          {!loading && activeView === 'depth' && (
+            <DepthChart lastPrice={lastPrice} />
           )}
         </div>
 
+        {/* Volume bar sub-chart */}
         <div className="h-24 mt-2">
           {activeView === 'price' && !loading && volumeData && (
             <Chart type="bar" data={volumeData} options={volOptions} />
           )}
           {activeView === 'depth' && !loading && (
-            <div className="text-sm text-gray-400 flex items-center justify-center h-full pt-[30px]">Depth view shows aggregated bids/asks</div>
+            <div className="text-sm text-gray-400 flex items-center justify-center h-full">
+              Depth view shows aggregated bids/asks
+            </div>
           )}
         </div>
       </div>
     </div>
   )
 }
-
-
-
