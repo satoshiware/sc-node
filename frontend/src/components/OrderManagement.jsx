@@ -34,7 +34,7 @@ export default function OrderManagement({ setView }){
           </div>
 
           <div className="flex items-center gap-3">
-            <Deposit  />
+            <Deposit />
             <ManageFunds />
             <Profile />
           </div>
