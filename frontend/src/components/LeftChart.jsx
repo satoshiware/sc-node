@@ -15,6 +15,52 @@ import 'chartjs-adapter-date-fns'
 import { CandlestickController, CandlestickElement } from 'chartjs-chart-financial'
 import DepthChart from './DepthChart'
 
+// white crosshair plugin – draws vertical line and top-of-candle horizontal
+// please keep this in the file; removing it will disable the reference line
+const verticalCrosshairPlugin = {
+  id: 'verticalCrosshair',
+  afterDraw(chart) {
+    const { ctx, chartArea, scales } = chart
+    const active = chart.tooltip.getActiveElements ? chart.tooltip.getActiveElements() : chart.tooltip?.active || []
+    if (!active.length) return
+    const { top, left, width, height } = chartArea
+    const point = active[0]
+    if (!point) return
+
+    let xPos = chart.tooltip.caretX
+    if (xPos === undefined) {
+      xPos = point.element?.x
+    }
+    if (xPos === undefined) return
+    if (xPos < left) xPos = left
+    if (xPos > left + width) xPos = left + width
+
+    const yScale = scales.y
+    const highVal = point.raw?.h
+    const yHigh = yScale ? yScale.getPixelForValue(highVal) : undefined
+
+    ctx.save()
+    ctx.strokeStyle = '#ffffff'
+    ctx.lineWidth = 1.5
+    ctx.setLineDash([4, 2])
+
+    // vertical crosshair
+    ctx.beginPath()
+    ctx.moveTo(xPos, top)
+    ctx.lineTo(xPos, top + height)
+    ctx.stroke()
+
+    // horizontal line at high
+    if (yHigh !== undefined) {
+      ctx.beginPath()
+      ctx.moveTo(left, yHigh)
+      ctx.lineTo(left + width, yHigh)
+      ctx.stroke()
+    }
+    ctx.restore()
+  }
+}
+
 ChartJS.register(
   CategoryScale,
   LinearScale,
@@ -25,7 +71,8 @@ ChartJS.register(
   BarElement,
   BarController,
   CandlestickController,
-  CandlestickElement
+  CandlestickElement,
+  verticalCrosshairPlugin
 )
 
 const MAX_CANDLES = 240
@@ -205,8 +252,8 @@ export default function LeftChart() {
     },
     plugins: {
       legend: { display: false },
-      tooltip: { mode: 'index', intersect: false },
-    },
+      tooltip: { mode: 'index', intersect: false },      
+      verticalCrosshair: {},    }, //enables the plugin
     animation: false,
   }
 
