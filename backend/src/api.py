@@ -105,10 +105,11 @@ class StatsConnectionManager:
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
-
+        print(f"[Stats WS] Client connected. Total: {len(self.active_connections)}")
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
+        print(f"[Stats WS] Client disconnected. Total: {len(self.active_connections)}")
 
     async def broadcast(self, message: dict):
         dead = []
@@ -116,6 +117,7 @@ class StatsConnectionManager:
             try:
                 await ws.send_json(message)
             except Exception as e:
+                print(f"[Stats WS] Send error: {e}")
                 dead.append(ws)
         for ws in dead:
             self.disconnect(ws)
@@ -128,9 +130,11 @@ candles_manager = CandlesConnectionManager()
 stats_manager   = StatsConnectionManager()
 
 # NOW import broadcast and register managers
-from broadcast import set_manager, set_event_loop, start_trade_signal_monitor, set_candles_manager
+from broadcast import set_manager, set_event_loop, start_trade_signal_monitor, set_candles_manager, set_stats_manager, set_trades_manager
 set_manager(manager)
+set_trades_manager(trades_manager)   # ← ADD
 set_candles_manager(candles_manager)
+set_stats_manager(stats_manager)    
 
 # ─── Startup ──────────────────────────────────────────────────────────────────
 

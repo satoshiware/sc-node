@@ -49,7 +49,7 @@ def get_market_stats():
     open_price = prices[0]   # first trade price in 24h window
     high_24h = max(prices)
     low_24h = min(prices)
-    volume_24h = sum(quantities)
+    volume_24h = sum(q * p for q, p in zip(quantities, prices)) # total traded volume in currency units (price * quantity)
     
     # Change percentage
     change_24h = ((last_price - open_price) / open_price * 100) if open_price > 0 else 0
