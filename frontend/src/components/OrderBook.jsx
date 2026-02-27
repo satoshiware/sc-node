@@ -91,8 +91,8 @@ export default function OrderBook(){
   }
 
   return (
-    <div className="bg-gray-800 p-3 rounded-md">
-      <div className="flex items-center justify-between mb-2">
+    <div className="bg-gray-800 p-3 rounded-md min-w-0">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-2">
         <div className="text-sm font-medium">Order book</div>
         <div className="text-xs text-gray-400">
           <div className="flex items-center space-x-2">
@@ -114,7 +114,7 @@ export default function OrderBook(){
         <div className="text-right">Price (SATS)</div>
       </div>
 
-      <div className="space-y-1 overflow-y-auto h-96 pr-2">
+      <div className="space-y-1 overflow-y-auto h-48 sm:h-64 md:h-80 lg:h-96 pr-2">
         {asks.map((a, i) => (
           <Row key={`ask-${a.id || i}`} price={a.price.toLocaleString()} amount={a.amount} side="ask" />
         ))}

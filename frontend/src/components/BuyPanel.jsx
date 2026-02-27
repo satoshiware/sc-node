@@ -9,9 +9,9 @@ export default function BuyPanel(){
   const availableSell = '1,234,560' // in SATS
 
   return (
-    <div className="bg-gray-800 p-4 rounded-md">
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center space-x-2">
+    <div className="bg-gray-800 p-3 sm:p-4 rounded-md min-w-0">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-3">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={() => setTab('buy')}
             className={"px-3 py-1 rounded-md text-sm " + (tab === 'buy' ? 'bg-gray-700 text-white' : 'text-gray-400')}
@@ -29,7 +29,7 @@ export default function BuyPanel(){
         <div className="text-xs text-gray-400">{orderType === 'market' ? 'Market' : 'Limit'}</div>
       </div>
 
-      <div className="mb-3 flex items-center gap-2">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
         <button
           onClick={() => setOrderType('market')}
           className={"px-3 py-1 rounded-md text-sm " + (orderType === 'market' ? 'bg-gray-700 text-white' : 'text-gray-400')}
@@ -47,7 +47,7 @@ export default function BuyPanel(){
       <div className="space-y-2">
         {/* Available - denomination depends on buy vs sell */}
         <div className="text-xs text-gray-400">Available</div>
-        <div className="bg-gray-900 p-2 rounded flex items-center justify-between">
+        <div className="bg-gray-900 p-2 rounded flex flex-wrap items-center justify-between gap-2">
           <div className="text-sm">
             {tab === 'buy' ? marketDenom : 'SATS'}
           </div>
@@ -56,9 +56,9 @@ export default function BuyPanel(){
           </div>
         </div>
 
-        <div className="flex gap-2">
-          <input className="flex-1 p-2 bg-gray-900 rounded outline-none" placeholder={`Amount (${tab === 'buy' ? marketDenom : 'SATS'})`} />
-          <div className="flex items-center space-x-2">
+        <div className="flex flex-col gap-2 sm:flex-row sm:gap-2">
+          <input className="flex-1 min-w-0 p-2 bg-gray-900 rounded outline-none w-full" placeholder={`Amount (${tab === 'buy' ? marketDenom : 'SATS'})`} />
+          <div className="flex flex-wrap items-center gap-2">
             {orderType === 'market' && (
               <>
                 <button className="px-2 py-1 bg-gray-700 rounded text-sm">25%</button>
@@ -70,7 +70,7 @@ export default function BuyPanel(){
         </div>
 
         {orderType === 'limit' && (
-          <input className="w-full p-2 bg-gray-900 rounded outline-none" placeholder={`Limit price (${tab === 'buy' ? 'SATS' : marketDenom})`} />
+          <input className="w-full min-w-0 p-2 bg-gray-900 rounded outline-none" placeholder={`Limit price (${tab === 'buy' ? 'SATS' : marketDenom})`} />
         )}
 
         {orderType === 'market' && (
@@ -100,7 +100,7 @@ export default function BuyPanel(){
         </div>
 
         <button
-          className={"w-full mt-2 py-2 rounded " + (tab === 'buy' ? 'bg-green-600 text-black' : 'bg-red-600 text-white')}
+          className={"w-full mt-2 py-2 rounded text-sm sm:text-base " + (tab === 'buy' ? 'bg-green-600 text-black' : 'bg-red-600 text-white')}
         >
           {tab === 'buy'
             ? (orderType === 'limit' ? 'Place Limit Buy' : 'Buy SATS')

@@ -194,16 +194,16 @@ export default function DepthChart({ lastPrice = null, wsUrl = "ws://localhost:8
   }, [orders, lastPrice, depth]);
 
   return (
-    <div className="relative text-gray-200">
+    <div className="relative text-gray-200 min-w-0">
       {/* Header */}
-      <div className="flex justify-between items-baseline mb-2">
-        <div className="text-sm">
+      <div className="flex flex-col gap-1 sm:flex-row sm:justify-between sm:items-baseline mb-2">
+        <div className="text-xs sm:text-sm">
           Depth{" "}
           <span className="font-semibold text-green-400">{nf(totals.totalBidAmount, { maximumFractionDigits: 4 })}</span>{" "}
           /{" "}
           <span className="font-semibold text-red-400">{nf(totals.totalAskAmount, { maximumFractionDigits: 4 })}</span>
         </div>
-        <div className="text-sm">
+        <div className="text-xs sm:text-sm">
           Total Cost <span className="font-semibold text-red-400">{nf(totals.totalCost)}</span>
         </div>
       </div>
@@ -216,7 +216,7 @@ export default function DepthChart({ lastPrice = null, wsUrl = "ws://localhost:8
       </div>
 
       {/* Chart */}
-      <div style={{ height: 360 }}>
+      <div className="h-48 sm:h-64 md:h-80 lg:h-[360px] min-w-0">
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={data} margin={{ top: 8, right: 36, left: 8, bottom: 24 }}>
             <CartesianGrid stroke="#1f2937" strokeDasharray="3 3" />

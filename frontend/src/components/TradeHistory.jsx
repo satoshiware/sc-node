@@ -52,16 +52,16 @@ export default function TradeHistory(){
   }
 
   return (
-    <div className="bg-gray-800 p-3 rounded-md">
+    <div className="bg-gray-800 p-3 rounded-md min-w-0 overflow-hidden">
       <div className="text-sm font-medium mb-2">Trade History</div>
       
-      <div className="text-xs text-gray-400 grid grid-cols-4 gap-2 border-b border-gray-700 pb-2">
+      <div className="grid grid-cols-3 gap-1 md:gap-2 text-xs text-gray-400 border-b border-gray-700 pb-2">
         <div>Time</div>
         <div>Price (SATS)</div>
         <div>Amount (AZC)</div>
       </div>
 
-      <div className="mt-2 space-y-1 text-sm max-h-96 overflow-y-auto pr-2">
+      <div className="mt-2 space-y-1 text-xs sm:text-sm max-h-48 sm:max-h-64 md:max-h-80 lg:max-h-96 overflow-y-auto pr-2">
         {trades.length === 0 ? (
           <div className="text-xs text-gray-500 py-4">No trades yet</div>
         ) : (
@@ -78,10 +78,10 @@ export default function TradeHistory(){
               : 'text-red-400'
             
             return (
-              <div key={t.id || i} className="grid grid-cols-4 gap-2 text-gray-200 items-center py-1 hover:bg-gray-700 px-1 rounded">
-                <div className="text-xs text-gray-300">{timeStr}</div>
-                <div className={`font-mono ${sideColor}`}>{t.price}</div>
-                <div className="font-mono">{amount}</div>
+              <div key={t.id || i} className="grid grid-cols-3 gap-1 md:gap-2 text-gray-200 items-center py-1 hover:bg-gray-700 px-1 rounded">
+                <div className="text-xs text-gray-300 truncate">{timeStr}</div>
+                <div className={`font-mono truncate ${sideColor}`}>{t.price}</div>
+                <div className="font-mono truncate">{amount}</div>
               </div>
             )
           })

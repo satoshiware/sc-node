@@ -14,7 +14,7 @@ export default function App(){
   const [view, setView] = useState('home')
 
   return (
-    <div className="min-h-screen p-4">
+    <div className="min-h-screen p-2 sm:p-4">
       {view === 'home' && <Header setView={setView} />}
 
       {view === 'orders' ? (
@@ -24,12 +24,12 @@ export default function App(){
       ) : view === 'exchange' ? (
         <Exchange setView={setView} />
       ) : (
-        <div className="mt-4 grid grid-cols-12 gap-4">
-          <div className="col-span-8 space-y-4">
+        <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-12 lg:gap-4 xl:gap-4">
+          <div className="flex flex-col gap-4 md:col-span-8 xl:col-span-8">
             <LeftChart />
 
             <div className="bg-gray-800 p-3 rounded-md">
-              <div className="flex items-center justify-between text-sm text-gray-400">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-gray-400">
                 <div className="flex items-center gap-3">
                   <span>6M</span><span>3M</span><span>1M</span><span>5D</span>
                 </div>
@@ -43,8 +43,8 @@ export default function App(){
             <OrdersTable />
           </div>
 
-          <div className="col-span-4 space-y-4">
-            <div className="grid grid-cols-2 gap-3">
+          <div className="flex flex-col gap-4 md:col-span-4 xl:col-span-4">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-2">
               <OrderBook />
               <TradeHistory />
             </div>

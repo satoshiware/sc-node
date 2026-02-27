@@ -277,32 +277,32 @@ export default function LeftChart() {
   }
 
   return (
-    <div className="chart-placeholder rounded-md p-4 min-h-[360px]">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center space-x-2">
+    <div className="chart-placeholder rounded-md p-3 sm:p-4 min-h-[280px] md:min-h-[320px] lg:min-h-[360px]">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={() => setActiveView('price')}
-            className={`px-3 py-1 rounded ${activeView === 'price' ? 'bg-gray-700 text-white' : 'text-gray-400'}`}
+            className={`px-3 py-1 rounded text-sm ${activeView === 'price' ? 'bg-gray-700 text-white' : 'text-gray-400'}`}
           >
             Price chart
           </button>
           <button
             onClick={() => setActiveView('depth')}
-            className={`px-3 py-1 rounded ${activeView === 'depth' ? 'bg-gray-700 text-white' : 'text-gray-400'}`}
+            className={`px-3 py-1 rounded text-sm ${activeView === 'depth' ? 'bg-gray-700 text-white' : 'text-gray-400'}`}
           >
             Depth chart
           </button>
         </div>
-        <div className="text-sm text-gray-400">
+        <div className="text-xs sm:text-sm text-gray-400">
           {lastPrice ? `Last: ${lastPrice.toLocaleString()}` : 'Waiting for trades…'}
         </div>
       </div>
 
-      <div className="mt-6 bg-transparent rounded-md">
+      <div className="mt-4 md:mt-6 bg-transparent rounded-md">
         {/* Main chart area */}
-        <div className="h-72">
+        <div className="h-48 sm:h-56 md:h-64 lg:h-72">
           {loading && (
-            <div className="flex items-center justify-center h-full text-gray-400">
+            <div className="flex items-center justify-center h-full text-gray-400 text-sm">
               Waiting for trades…
             </div>
           )}
@@ -319,12 +319,12 @@ export default function LeftChart() {
         </div>
 
         {/* Volume bar sub-chart */}
-        <div className="h-24 mt-2">
+        <div className="h-16 sm:h-20 md:h-24 mt-2">
           {activeView === 'price' && !loading && volumeData && (
             <Chart type="bar" data={volumeData} options={volOptions} />
           )}
           {activeView === 'depth' && !loading && (
-            <div className="text-sm text-gray-400 flex items-center justify-center h-full">
+            <div className="text-xs sm:text-sm text-gray-400 flex items-center justify-center h-full">
               Depth view shows aggregated bids/asks
             </div>
           )}

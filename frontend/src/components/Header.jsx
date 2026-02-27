@@ -75,13 +75,13 @@ export default function Header({ setView }) {
   }
 
   return (
-    <header className="flex items-center justify-between w-full sticky top-0 z-20 bg-gray-900/50 backdrop-blur-sm px-4 py-3 border-b border-gray-700">
-      <div className="flex items-center gap-6">
+    <header className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between w-full sticky top-0 z-20 bg-gray-900/50 backdrop-blur-sm px-3 py-3 sm:px-4 border-b border-gray-700">
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:gap-6 md:flex-wrap">
         <MarketSelect />
 
         <div className="flex items-baseline gap-3">
           <div className="text-xs text-gray-400">Last Price (24H)</div>
-          <div className="text-lg font-semibold text-white">
+          <div className="text-base sm:text-lg font-semibold text-white">
             ${stats.last_price ? nf(stats.last_price, { maximumFractionDigits: 2 }) : "0.00"}
             {changeStr && (
               <span className={`${changeColor} text-sm ml-2`}>{changeStr}</span>
@@ -89,7 +89,7 @@ export default function Header({ setView }) {
           </div>
         </div>
 
-        <div className="flex items-center gap-6 text-sm text-gray-400">
+        <div className="flex flex-wrap items-center gap-4 md:gap-6 text-sm text-gray-400">
           <div>
             <div className="text-xs text-gray-400">24H Volume</div>
             <div className="text-sm text-gray-200">${stats.volume_24h ? nf(stats.volume_24h, { maximumFractionDigits: 2 }) : "0.00"}</div>
@@ -105,8 +105,8 @@ export default function Header({ setView }) {
         </div>
       </div>
 
-      <div className="flex items-center gap-6">
-        <nav className="flex items-center gap-6">
+      <div className="flex flex-wrap items-center justify-between gap-3 md:justify-end md:gap-6">
+        <nav className="flex flex-wrap items-center gap-3 md:gap-6">
           <button
             type="button"
             onClick={() => {

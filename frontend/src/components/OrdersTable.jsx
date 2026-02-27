@@ -89,9 +89,9 @@ export default function OrdersTable(){
   if (orders.length === 0) return <div className="text-gray-400">No open orders</div>
 
   return (
-    <div className="bg-gray-800 p-3 rounded-md mt-2">
+    <div className="bg-gray-800 p-3 rounded-md mt-2 min-w-0 overflow-x-auto">
       <div className="text-xs text-gray-400 mb-1">Order</div>
-      <div className="text-xs text-gray-400 grid grid-cols-8 gap-2 border-b border-gray-700 pb-2">
+      <div className="grid grid-cols-8 gap-1 sm:gap-2 border-b border-gray-700 pb-2 text-gray-400 min-w-[520px]">
         <div>Time Placed</div>
         <div>Type</div>
         <div>Side</div>
@@ -102,15 +102,15 @@ export default function OrdersTable(){
         <div className="text-right">Actions</div>
       </div>
 
-      <div className="mt-2 space-y-2 text-sm max-h-64 overflow-y-auto pr-2">
+      <div className="mt-2 space-y-2 text-xs sm:text-sm max-h-48 sm:max-h-56 md:max-h-64 overflow-y-auto pr-2">
         {orders.map((o,i)=> (
-          <div key={o.id || i} className="grid grid-cols-8 gap-2 text-gray-200 items-center">
-            <div className="text-xs text-gray-200">{o.time}</div>
-            <div>{o.type}</div>
-            <div>{o.side}</div>
-            <div>{displayPrice(o.priceSats)}</div>
-            <div>{o.amount}</div>
-            <div>{o.total}</div>
+          <div key={o.id || i} className="grid grid-cols-8 gap-1 sm:gap-2 text-gray-200 items-center min-w-[520px]">
+            <div className="text-xs text-gray-200 truncate">{o.time}</div>
+            <div className="truncate">{o.type}</div>
+            <div className="truncate">{o.side}</div>
+            <div className="truncate">{displayPrice(o.priceSats)}</div>
+            <div className="truncate">{o.amount}</div>
+            <div className="truncate">{o.total}</div>
             <div className={o.status === 'Open' ? 'text-green-300' : o.status === 'Filled' ? 'text-gray-400' : 'text-yellow-300'}>{o.status}</div>
             <div className="text-right">
               {o.status === 'Open' && o.type === 'Limit' ? (
