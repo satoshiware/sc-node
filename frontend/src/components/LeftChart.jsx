@@ -82,6 +82,7 @@ export default function LeftChart() {
   const [volumeData, setVolumeData]   = useState(null)
   const [loading, setLoading]         = useState(true)
   const [activeView, setActiveView]   = useState('price') // 'price' | 'depth'
+  const [viewPosition, setViewPosition] = useState(100)   // 0–100: horizontal slider position
   const wsRef       = useRef(null)
   const reconnectRef = useRef(null)
 
@@ -226,6 +227,30 @@ export default function LeftChart() {
     return last ? last.c : null
   })()
 
+  // derive shared x-axis min/max from slider and available data
+  const computeXRange = () => {
+    if (!candleData || !candleData.datasets?.[0]?.data?.length) return {}
+    const data = candleData.datasets[0].data
+    const xs = data.map(d => d.x).sort((a, b) => a - b)
+    const minAll = xs[0]
+    const maxAll = xs[xs.length - 1]
+    if (minAll === maxAll) return {}
+
+    const totalSpan = maxAll - minAll
+    const windowPercent = 30 // visible window size (% of full range)
+    const clampedPos = Math.min(100, Math.max(0, viewPosition))
+    const rightFrac = clampedPos / 100
+    const right = minAll + totalSpan * rightFrac
+    const windowSpan = (totalSpan * windowPercent) / 100
+    let left = right - windowSpan
+    if (left < minAll) {
+      left = minAll
+    }
+    return { min: left, max: right }
+  }
+
+  const xRange = computeXRange()
+
   const options = {
     responsive: true,
     maintainAspectRatio: false,
@@ -242,6 +267,7 @@ export default function LeftChart() {
         time: { unit: 'second', displayFormats: { second: 'HH:mm:ss' } },
         ticks: { color: '#9CA3AF', maxTicksLimit: 8 },
         grid: { color: 'rgba(255,255,255,0.03)' },
+        ...xRange,
       },
       y: {
         display: true,
@@ -265,6 +291,7 @@ export default function LeftChart() {
         type: 'time',
         time: { unit: 'second', displayFormats: { second: 'HH:mm:ss' } },
         ticks: { color: '#9CA3AF', maxTicksLimit: 8 },
+        ...xRange,
       },
       y: {
         display: true,
@@ -329,6 +356,20 @@ export default function LeftChart() {
             </div>
           )}
         </div>
+
+        {/* Horizontal slider for panning the time range (price view only) */}
+        {activeView === 'price' && !loading && candleData && (
+          <div className="mt-3">
+            <input
+              type="range"
+              min="0"
+              max="100"
+              value={viewPosition}
+              onChange={(e) => setViewPosition(Number(e.target.value))}
+              className="w-full accent-gray-500"
+            />
+          </div>
+        )}
       </div>
     </div>
   )
