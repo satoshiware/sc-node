@@ -15,6 +15,11 @@ BITCOIN_LOG_DIR="${BITCOIN_LOG_DIR:-/var/log/bitcoin}"
 BITCOIN_CONF="${BITCOIN_CONF_DIR}/bitcoin.conf"
 RPC_PASSWORD_FILE="${RPC_PASSWORD_FILE:-/home/bitcoin/rpcpassword}"
 
+# Bind RPC/ZMQ to Docker network (e.g. aznet): set RPC_BIND=0.0.0.0, ZMQ_BIND=0.0.0.0, RPC_ALLOW_IP to network CIDR
+RPC_BIND="${BITCOIN_RPC_BIND:-127.0.0.1}"
+ZMQ_BIND="${BITCOIN_ZMQ_BIND:-127.0.0.1}"
+RPC_ALLOW_IP="${BITCOIN_RPC_ALLOW_IP:-127.0.0.1}"
+
 # Ensure volume dirs are owned by bitcoin (when using named volumes)
 if [[ "$(id -u)" = "0" ]]; then
     chown -R bitcoin:bitcoin "${BITCOIN_DATA}" "${BITCOIN_CONF_DIR}" "${BITCOIN_LOG_DIR}" 2>/dev/null || true
@@ -36,19 +41,19 @@ if [[ ! -f "${BITCOIN_CONF}" ]]; then
     chmod 600 "${RPC_PASSWORD_FILE}"
     [[ "$(id -u)" = "0" ]] && chown bitcoin:bitcoin "${RPC_PASSWORD_FILE}" "${BITCOIN_CONF}" 2>/dev/null || true
 
-    # Same options as bitcoin-install.sh; daemon=0 for container foreground
+    # Same options as bitcoin-install.sh; daemon=0 for container foreground. RPC/ZMQ bind from env (see BITCOIN_RPC_BIND, BITCOIN_ZMQ_BIND, BITCOIN_RPC_ALLOW_IP).
     cat > "${BITCOIN_CONF}" << EOF
 # Bitcoin configuration for SC Node (Docker - mirrors bitcoin-install.sh)
 daemon=0
 server=1
 ${RPCAUTH}
-rpcbind=127.0.0.1
-rpcallowip=127.0.0.1
+rpcbind=${RPC_BIND}
+rpcallowip=${RPC_ALLOW_IP}
 wallet=wallet
 walletnotify=/usr/local/bin/wallet_event_append.sh %s %w
 prune=131072
 listen=0
-zmqpubhashblock=tcp://127.0.0.1:28332
+zmqpubhashblock=tcp://${ZMQ_BIND}:28332
 dbcache=4096
 EOF
 fi
