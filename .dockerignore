@@ -1,0 +1,24 @@
+# Git and IDE
+.git
+.cursor
+*.md
+!README.md
+
+# ISO build artifacts (not needed for Bitcoin image)
+tmp-debian-files
+modified.iso
+*.iso
+
+# Preseed / Debian install (not used in Docker)
+preseed.cfg
+
+# Other scripts (only Dockerfile + docker-entrypoint.sh are used for Bitcoin image)
+firstboot.sh
+late-commands.sh
+setup.sh
+build-scnode-iso.sh
+bitcoin-install.sh
+
+# Docs
+CHANGELOG.md
+LICENSE

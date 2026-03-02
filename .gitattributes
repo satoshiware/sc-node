@@ -1,0 +1,2 @@
+# Force LF line endings for shell scripts (avoids "bash\r: No such file or directory" in Docker/Linux)
+*.sh text eol=lf
