@@ -366,7 +366,7 @@ export default function LeftChart() {
               max="100"
               value={viewPosition}
               onChange={(e) => setViewPosition(Number(e.target.value))}
-              className="w-full accent-gray-500"
+              className="w-full range-slider-dark"
             />
           </div>
         )}

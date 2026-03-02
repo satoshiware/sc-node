@@ -114,7 +114,9 @@ export default function OrderBook(){
         <div className="text-right">Price (SATS)</div>
       </div>
 
-      <div className="space-y-1 overflow-y-auto h-48 sm:h-64 md:h-80 lg:h-96 pr-2">
+      <div
+        className="space-y-1 overflow-y-auto h-48 sm:h-64 md:h-80 lg:h-96 pr-2 scrollbar-dark"
+      >
         {asks.map((a, i) => (
           <Row key={`ask-${a.id || i}`} price={a.price.toLocaleString()} amount={a.amount} side="ask" />
         ))}

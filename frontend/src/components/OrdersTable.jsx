@@ -102,7 +102,9 @@ export default function OrdersTable(){
         <div className="text-right">Actions</div>
       </div>
 
-      <div className="mt-2 space-y-2 text-xs sm:text-sm max-h-48 sm:max-h-56 md:max-h-64 overflow-y-auto pr-2">
+      <div
+        className="mt-2 space-y-2 text-xs sm:text-sm max-h-48 sm:max-h-56 md:max-h-64 overflow-y-auto pr-2 scrollbar-dark"
+      >
         {orders.map((o,i)=> (
           <div key={o.id || i} className="grid grid-cols-8 gap-1 sm:gap-2 text-gray-200 items-center min-w-[520px]">
             <div className="text-xs text-gray-200 truncate">{o.time}</div>

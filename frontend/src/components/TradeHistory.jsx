@@ -61,7 +61,9 @@ export default function TradeHistory(){
         <div>Amount (AZC)</div>
       </div>
 
-      <div className="mt-2 space-y-1 text-xs sm:text-sm max-h-48 sm:max-h-64 md:max-h-80 lg:max-h-96 overflow-y-auto pr-2">
+      <div
+        className="mt-2 space-y-1 text-xs sm:text-sm max-h-48 sm:max-h-64 md:max-h-80 lg:max-h-96 overflow-y-auto pr-2 scrollbar-dark"
+      >
         {trades.length === 0 ? (
           <div className="text-xs text-gray-500 py-4">No trades yet</div>
         ) : (

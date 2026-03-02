@@ -28,6 +28,59 @@ h1, h2, h3, h4, strong, b {
   border: 1px solid rgba(255,255,255,0.04);
 }
 
+/* Dark range slider: no white track or thumb */
+.range-slider-dark {
+  @apply accent-gray-600;
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+}
+.range-slider-dark::-webkit-slider-runnable-track {
+  height: 6px;
+  background: #1f2937; /* gray-800 */
+  border-radius: 9999px;
+}
+.range-slider-dark::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #4b5563; /* gray-600 */
+  border: 2px solid #111827; /* gray-900 */
+  margin-top: -5px;
+  cursor: pointer;
+}
+.range-slider-dark::-moz-range-track {
+  height: 6px;
+  background: #1f2937;
+  border-radius: 9999px;
+}
+.range-slider-dark::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #4b5563;
+  border: 2px solid #111827;
+  cursor: pointer;
+}
+
+/* Dark scrollbar for overflow areas (replaces inline scrollbarColor) */
+.scrollbar-dark {
+  scrollbar-color: #4b5563 #111827;
+}
+.scrollbar-dark::-webkit-scrollbar {
+  width: 8px;
+}
+.scrollbar-dark::-webkit-scrollbar-track {
+  background: #111827;
+}
+.scrollbar-dark::-webkit-scrollbar-thumb {
+  background: #4b5563;
+  border-radius: 9999px;
+  border: 2px solid #111827;
+}
+
 /* Make Tailwind's .font-bold less heavy for a subtler UI */
 .font-bold {
   font-weight: 500 !important;
