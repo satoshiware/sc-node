@@ -1,0 +1,40 @@
+# =============================================================================
+# SC Node - Bitcoin Core (Docker Compose)
+# Mirrors the environment produced by bitcoin-install.sh:
+#   - Pruned node (prune=131072), RPC and ZMQ on localhost
+#   - Wallet "wallet", rpcauth user "satoshi"
+# =============================================================================
+services:
+  bitcoind:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BITCOIN_VERSION: "30.2"
+    image: sc-node-bitcoin:30.2
+    container_name: sc-node-bitcoind
+    hostname: bitcoind
+    restart: unless-stopped
+    # Same layout as bitcoin-install.sh: data, config, logs
+    volumes:
+      - bitcoin-data:/var/lib/bitcoin
+      - bitcoin-logs:/var/log/bitcoin
+    # RPC 8332 and ZMQ 28332 (optional: bind to host for local tools)
+    ports:
+      - "127.0.0.1:8332:8332"
+      - "127.0.0.1:28332:28332"
+    environment:
+      - BITCOIN_DATA=/var/lib/bitcoin
+      - BITCOIN_CONF_DIR=/etc/bitcoin
+      - RPC_PASSWORD_FILE=/home/bitcoin/rpcpassword
+    # Resource limits (README: 32 GB RAM, 4 cores; adjust as needed)
+    deploy:
+      resources:
+        limits:
+          memory: 6G
+        reservations:
+          memory: 2G
+
+volumes:
+  bitcoin-data:
+  bitcoin-logs:

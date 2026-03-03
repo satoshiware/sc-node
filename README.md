@@ -87,6 +87,16 @@ Proxmox VE serves as the foundational hypervisor for the SC Node, providing robu
 * Cold Storage Management
 * See Overall Mining Stats & Payouts
 
+## Docker (Bitcoin Core)
+A Docker image and Compose file mirror the bare-metal Bitcoin Core setup from `bitcoin-install.sh` (pruned node, RPC, ZMQ, wallet). They are separate implementations—if you change `bitcoin-install.sh`, update the Dockerfile and `docker-entrypoint.sh` to match. From the repo root:
+
+- **Build and run:** `docker compose up -d`
+- **RPC (e.g. getblockchaininfo):**  
+  On **PowerShell**, quote arguments so `.conf` is not stripped:  
+  `docker compose exec bitcoind bitcoin-cli "-conf=/etc/bitcoin/bitcoin.conf" "-datadir=/var/lib/bitcoin" getblockchaininfo`  
+  On Linux/macOS: `docker compose exec bitcoind bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getblockchaininfo`
+- **RPC password:** `docker compose exec bitcoind cat /home/bitcoin/rpcpassword`
+
 ## Build Installation ISO
 Download and execute the sc_node/build-scnode-iso.sh script, on linux, in any $USER directory w/ sudo privileges. Once complete, the iso (named "modified.iso") will have been remastered into the execution directory. *Note: This project does **not** involve traditional compilation of source code.  Instead, it **remasters** an official Debian DVD-1 ISO (stable release) with the following changes:*
 
