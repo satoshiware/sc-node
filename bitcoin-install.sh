@@ -5,8 +5,8 @@ set -euo pipefail
 # SC Node - Bitcoin Core Installation Script (Bare Metal)
 #
 # Script Testing Prerequisites: Make sure Bitcoin .tar.gz is available
-#   sudo apt update && sudo apt full-upgrade -y && sudo apt autoremove -y && sudo apt autoclean
-#   sudo apt install -y curl python3 python-is-python3 # In WSL, Python is not installed by default (required for rpcauth.py script)
+#   apt update && sudo apt full-upgrade -y && sudo apt autoremove -y && sudo apt autoclean
+#   apt install -y curl python3 python-is-python3 # In WSL, Python is not installed by default (required for rpcauth.py script)
 #   VERSION=30.2
 #   curl -O https://bitcoincore.org/bin/bitcoin-core-${VERSION}/bitcoin-${VERSION}-x86_64-linux-gnu.tar.gz
 # =============================================================================
@@ -147,7 +147,7 @@ wallet=wallet
 
 # Walletnotify: trigger script on tx events (unconf, conf, sends, RBF)
 # Logs to wallet_events.log in home dir
-walletnotify=/usr/local/bin/wallet_event_append.sh %s %w
+walletnotify=/usr/local/bin/bitcoin_wallet_event_append.sh %s %w
 
 # assumevalid: default enabled - uses built-in checkpoint
 # Skips sig/script checks on old blocks → 2-5x faster initial sync
@@ -175,19 +175,19 @@ fi
 
 # ===================== WALLET NOTIFY SCRIPT =====================
 log "Creating walletnotify script..."
-cat > /usr/local/bin/wallet_event_append.sh << EOF
+cat > /usr/local/bin/bitcoin_wallet_event_append.sh << EOF
 #!/usr/bin/env bash
-# wallet_event_append.sh - Append-only logger for walletnotify
+# bitcoin_wallet_event_append.sh - Append-only logger for walletnotify
 
 TIMESTAMP=\$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 TXID="\$1"
 WALLET="\$2"
 
-echo "\${TIMESTAMP} | \${TXID} | \${WALLET}" >> /var/log/bitcoin/bitcoin_wallet_events.log
+echo "\${TIMESTAMP} | \${TXID} | \${WALLET}" >> /var/log/bitcoin/wallet_events.log
 
 exit 0
 EOF
-chmod 755 /usr/local/bin/wallet_event_append.sh
+chmod 755 /usr/local/bin/bitcoin_wallet_event_append.sh
 
 # ===================== SYMLINK FOR FHS-COMPLIANT LOG LOCATION =====================
 LOG_SYMLINK="/var/log/bitcoin/debug.log"
@@ -300,9 +300,9 @@ log "bitcoind is now running (systemctl start bitcoind was issued). You can stop
 
 # ===================== Create/Update Files w/ Correct Owners/Permissions =====================
 chmod 640 /var/lib/bitcoin/debug.log
-touch /var/log/bitcoin/bitcoin_wallet_events.log
-chown bitcoin:bitcoin /var/log/bitcoin/bitcoin_wallet_events.log
-chmod 640 /var/log/bitcoin/bitcoin_wallet_events.log
+touch /var/log/bitcoin/wallet_events.log
+chown bitcoin:bitcoin /var/log/bitcoin/wallet_events.log
+chmod 640 /var/log/bitcoin/wallet_events.log
 
 # ===================== README =====================
 log "Creating system-wide documentation README..."
@@ -318,7 +318,7 @@ cat > "${README_FILE}" << EOF
     bitcoind (755 root:root)
     bitcoin-cli (755 root:root)
     rpcauth.py (755 root:root)
-    wallet_event_append.sh (755 root:root)
+    bitcoin_wallet_event_append.sh (755 root:root)
 - blockchain data directory: /var/lib/bitcoin (710 bitcoin:bitcoin)
     .cookie (600 bitcoin:bitcoin)
     debug.log (640 bitcoin:bitcoin)
@@ -339,11 +339,11 @@ cat > "${README_FILE}" << EOF
 - Status/Logs: sudo systemctl status bitcoind   or   sudo journalctl -u bitcoind -f
 - RPC Test (.cookie authentication): sudo -u bitcoin bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getblockchaininfo
 - RPC Test (rpcauth authentication):
-	PASSWORD=$(sudo cat /home/bitcoin/rpcpassword)
-	curl --data-binary '{"jsonrpc":"1.0","id":"test","method":"getblockchaininfo","params":[]}' \
-		-H 'content-type: text/plain;' \
-		--user "satoshi:$PASSWORD" \
-		http://127.0.0.1:8332/
+    PASSWORD=$(sudo cat /home/bitcoin/rpcpassword)
+    curl --data-binary '{"jsonrpc":"1.0","id":"test","method":"getblockchaininfo","params":[]}' \
+        -H 'content-type: text/plain;' \
+        --user "satoshi:$PASSWORD" \
+        http://127.0.0.1:8332/
 
 ## Notes
 - Pruned (~128 GB final)
