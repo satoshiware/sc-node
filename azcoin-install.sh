@@ -33,6 +33,21 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# Check that 'python' command exists and points to python3
+if ! command -v python >/dev/null 2>&1; then
+    echo -e "Error! 'python' command not found"
+    echo "   You need 'python' to point to python3 (common for rpcauth.py and many scripts)"
+    echo "   Run: apt install -y python-is-python3"
+    exit 1
+elif ! python --version 2>&1 | grep -q "Python 3"; then
+    echo -e "Error! 'python' command exists but is not Python 3"
+    python --version
+    echo "   You need Python 3 (rpcauth.py requires it)"
+    exit 1
+else
+    echo -e "'python' command points to Python 3"
+fi
+
 log "Starting AZCoin Core setup..."
 
 # Find the first azcoin*.tar.gz
@@ -145,6 +160,9 @@ rpcallowip=127.0.0.1
 # P2P listening port for incoming connections from other nodes/peers (Default is 19333)
 port=19333
 
+# Force persistent outbound connection to specific trusted peer(s)
+addnode=azcoin-seed.satoshiware.org
+
 # Auto-load our named wallet
 wallet=wallet
 
@@ -216,7 +234,7 @@ Description=AZCoin Core daemon (SC Node)
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/azcoind -conf=/etc/azcoin/azcoin.conf -datadir=/var/lib/azcoin -seednode=azcoin-seed.satoshiware.org
+ExecStart=/usr/local/bin/azcoind -conf=/etc/azcoin/azcoin.conf -datadir=/var/lib/azcoin
 User=azcoin
 Group=azcoin
 Type=forking

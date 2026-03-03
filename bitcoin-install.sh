@@ -33,6 +33,21 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# Check that 'python' command exists and points to python3
+if ! command -v python >/dev/null 2>&1; then
+    echo -e "Error! 'python' command not found"
+    echo "   You need 'python' to point to python3 (common for rpcauth.py and many scripts)"
+    echo "   Run: apt install -y python-is-python3"
+    exit 1
+elif ! python --version 2>&1 | grep -q "Python 3"; then
+    echo -e "Error! 'python' command exists but is not Python 3"
+    python --version
+    echo "   You need Python 3 (rpcauth.py requires it)"
+    exit 1
+else
+    echo -e "'python' command points to Python 3"
+fi
+
 log "Starting Bitcoin Core setup..."
 
 # Find the first bitcoin*.tar.gz
