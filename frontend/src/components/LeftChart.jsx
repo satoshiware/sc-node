@@ -77,7 +77,7 @@ ChartJS.register(
 
 const MAX_CANDLES = 240
 
-export default function LeftChart() {
+export default function LeftChart({ priceGap = 1 }) {
   const [candleData, setCandleData]   = useState(null)
   const [volumeData, setVolumeData]   = useState(null)
   const [loading, setLoading]         = useState(true)
@@ -341,7 +341,7 @@ export default function LeftChart() {
 
           {/* Depth chart */}
           {!loading && activeView === 'depth' && (
-            <DepthChart lastPrice={lastPrice} />
+            <DepthChart lastPrice={lastPrice} priceGap={priceGap} />
           )}
         </div>
 

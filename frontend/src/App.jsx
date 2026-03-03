@@ -12,6 +12,7 @@ import Exchange from './components/Exchange'
 
 export default function App(){
   const [view, setView] = useState('home')
+  const [priceGap, setPriceGap] = useState(1)
 
   return (
     <div className="min-h-screen p-2 sm:p-4">
@@ -26,7 +27,7 @@ export default function App(){
       ) : (
         <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-12 lg:gap-4 xl:gap-4">
           <div className="flex flex-col gap-4 md:col-span-8 xl:col-span-8">
-            <LeftChart />
+            <LeftChart priceGap={priceGap} />
 
             <div className="bg-gray-800 p-3 rounded-md">
               <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-gray-400">
@@ -45,7 +46,7 @@ export default function App(){
 
           <div className="flex flex-col gap-4 md:col-span-4 xl:col-span-4">
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-2">
-              <OrderBook />
+              <OrderBook priceGap={priceGap} onPriceGapChange={setPriceGap} />
               <TradeHistory />
             </div>
 

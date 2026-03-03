@@ -11,32 +11,24 @@ import {
   CartesianGrid,
 } from "recharts";
 
-// number formatter
 const nf = (n, opts) => new Intl.NumberFormat(undefined, opts).format(n || 0);
 
-// aggregate amounts by price
-function aggregateByPrice(list) {
-  const map = new Map();
-  for (const { price, amount } of list) {
-    if (!Number.isFinite(price) || amount <= 0) continue;
-    map.set(price, (map.get(price) || 0) + amount);
-  }
-  return Array.from(map.entries()).map(([price, amount]) => ({ price, amount }));
-}
+export default function DepthChart({
+  lastPrice  = null,
+  wsUrl      = "ws://localhost:8000/ws/orders",
+  depth      = 50,
+  priceGap   = 1,
+}) {
+  const [orders, setOrders]   = useState([]);
+  const wsRef                 = useRef(null);
+  const reconnectRef          = useRef(null);
 
-export default function DepthChart({ lastPrice = null, wsUrl = "ws://localhost:8000/ws/orders", depth = 50 }) {
-  const [orders, setOrders] = useState([]);
-  const wsRef = useRef(null);
-  const reconnectRef = useRef(null);
-
-  // WebSocket connection
   useEffect(() => {
     function connect() {
       try {
         const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
-
-        ws.onopen = () => console.debug("[DepthChart] WS connected");
+        ws.onopen    = () => console.debug("[DepthChart] WS connected");
         ws.onmessage = (ev) => {
           try {
             const msg = JSON.parse(ev.data);
@@ -47,175 +39,196 @@ export default function DepthChart({ lastPrice = null, wsUrl = "ws://localhost:8
             console.error("[DepthChart] parse error", err);
           }
         };
-        ws.onerror = (err) => console.error("[DepthChart] WS error", err);
+        ws.onerror = () => ws.close();
         ws.onclose = () => {
-          console.debug("[DepthChart] WS closed, reconnecting...");
           reconnectRef.current = setTimeout(connect, 2000);
         };
-      } catch (err) {
-        console.error("[DepthChart] WS connect failed", err);
+      } catch {
         reconnectRef.current = setTimeout(connect, 2000);
       }
     }
     connect();
     return () => {
-      if (wsRef.current) wsRef.current.close();
-      if (reconnectRef.current) clearTimeout(reconnectRef.current);
+      wsRef.current?.close();
+      clearTimeout(reconnectRef.current);
     };
   }, [wsUrl]);
 
-  // compute chart data
   const { data, totals, midPrice, xTicks, yTicks } = useMemo(() => {
-    const limitPct = 0.25; // +/- window fraction
 
-    // parse & filter orders
+    // ── 1. parse & filter ─────────────────────────────────────────────────────
     const parsedOrders = (orders || [])
-      .filter(
-        (o) =>
-          o &&
-          o.type === "Limit" &&
-          Number(o.remaining_quantity) > 0 &&
-          (o.status === "Open" || o.status === "Partial")
+      .filter(o =>
+        o?.type === "Limit" &&
+        Number(o.remaining_quantity) > 0 &&
+        (o.status === "Open" || o.status === "Partial")
       )
-      .map((o) => {
-        const price =
-          o.priceSats != null ? parseInt(String(o.priceSats).replace(/,/g, ""), 10) : null;
-        return { price, amount: Number(o.remaining_quantity) || 0, side: o.side };
-      })
-      .filter((p) => p.price > 0 && p.amount > 0);
+      .map(o => ({
+        price:  o.priceSats != null
+                  ? parseInt(String(o.priceSats).replace(/,/g, ""), 10)
+                  : null,
+        amount: Number(o.remaining_quantity) || 0,
+        side:   o.side,
+      }))
+      .filter(p => p.price > 0 && p.amount > 0);
 
-    // aggregate by exact price first
-    const bidsByPrice = aggregateByPrice(parsedOrders.filter((p) => p.side === "Buy").map(p => ({ price: p.price, amount: p.amount })));
-    const asksByPrice = aggregateByPrice(parsedOrders.filter((p) => p.side === "Sell").map(p => ({ price: p.price, amount: p.amount })));
-    // sort
-    const aggBids = bidsByPrice.sort((a, b) => b.price - a.price);
-    const aggAsks = asksByPrice.sort((a, b) => a.price - b.price);
+    // ── 2. mid price from RAW unbucketed prices ───────────────────────────────
+    const rawBestBid = parsedOrders
+      .filter(o => o.side === "Buy")
+      .reduce((best, o) => (o.price > (best ?? -Infinity) ? o.price : best), null);
 
-    // compute best bid/ask and mid (prefer best bid/ask; fallback to lastPrice)
-    const bestBid = aggBids.length ? aggBids[0].price : null;
-    const bestAsk = aggAsks.length ? aggAsks[0].price : null;
-    const computedMid =
-      bestBid != null && bestAsk != null ? (bestBid + bestAsk) / 2 : (lastPrice ?? bestBid ?? bestAsk ?? null);
+    const rawBestAsk = parsedOrders
+      .filter(o => o.side === "Sell")
+      .reduce((best, o) => (o.price < (best ?? Infinity)  ? o.price : best), null);
 
-    // windowing around mid if available
-    const mid = computedMid != null ? Number(computedMid) : null;
-    let windowMin = null;
-    let windowMax = null;
-    if (mid) {
-      windowMin = Math.max(1, Math.floor(mid * (1 - limitPct)));
-      windowMax = Math.ceil(mid * (1 + limitPct));
-    }
+    const mid =
+      rawBestBid != null && rawBestAsk != null
+        ? (rawBestBid + rawBestAsk) / 2
+        : (lastPrice ?? rawBestBid ?? rawBestAsk ?? null);
 
-    // dynamic bucket sizing to avoid extremely dense X axis
-    const bucketSize = mid ? Math.max(1, Math.round(mid * 0.001)) : 1;
+    // ── 3. bucket by priceGap ─────────────────────────────────────────────────
+    const bidMap = new Map();
+    const askMap = new Map();
 
-    // bucket and aggregate into map {price -> {price, bid, ask}}
-    const mapAgg = new Map();
     for (const { price, amount, side } of parsedOrders) {
-      if (price == null) continue;
-      if (mid && (price < windowMin || price > windowMax)) continue; // apply window
-      const bucketPrice = Math.round(price / bucketSize) * bucketSize;
-      const key = bucketPrice;
-      const entry = mapAgg.get(key) || { price: key, bid: 0, ask: 0 };
-      if (side === "Buy") entry.bid += amount;
-      else entry.ask += amount;
-      mapAgg.set(key, entry);
+      const bucket = Math.floor(price / priceGap) * priceGap;
+      if (side === "Buy") {
+        bidMap.set(bucket, (bidMap.get(bucket) || 0) + amount);
+      } else {
+        askMap.set(bucket, (askMap.get(bucket) || 0) + amount);
+      }
     }
 
-    const aggList = Array.from(mapAgg.values());
-    const finalBids = aggList
-      .filter((x) => x.bid > 0)
-      .map((x) => ({ price: x.price, amount: x.bid }))
+    // bids: highest → lowest   asks: lowest → highest
+    const aggBids = Array.from(bidMap.entries())
+      .map(([price, amount]) => ({ price, amount }))
       .sort((a, b) => b.price - a.price);
-    const finalAsks = aggList
-      .filter((x) => x.ask > 0)
-      .map((x) => ({ price: x.price, amount: x.ask }))
+
+    const aggAsks = Array.from(askMap.entries())
+      .map(([price, amount]) => ({ price, amount }))
       .sort((a, b) => a.price - b.price);
 
-    // build price list (ascending)
-    let prices = Array.from(new Set([...finalAsks.map((a) => a.price), ...finalBids.map((b) => b.price)]));
-    prices.sort((a, b) => a - b);
+    // ── 4. window ±25% around mid ─────────────────────────────────────────────
+    const limitPct  = 0.25;
+    const windowMin = mid ? Math.max(1, Math.floor(mid * (1 - limitPct))) : null;
+    const windowMax = mid ? Math.ceil(mid * (1 + limitPct))               : null;
+    const inWindow  = p  => !mid || (p >= windowMin && p <= windowMax);
 
-    // fallback: if window filtered everything, include top N of each side (no window)
-    if (prices.length === 0) {
-      const fallbackBids = bidsByPrice.sort((a,b)=>b.price-a.price).slice(0, depth).map(x=>x.price);
-      const fallbackAsks = asksByPrice.sort((a,b)=>a.price-b.price).slice(0, depth).map(x=>x.price);
-      prices = Array.from(new Set([...fallbackAsks, ...fallbackBids])).sort((a,b)=>a-b);
+    const winBids = aggBids.filter(x => inWindow(x.price));
+    const winAsks = aggAsks.filter(x => inWindow(x.price));
+
+    const useBids = winBids.length ? winBids : aggBids.slice(0, depth);
+    const useAsks = winAsks.length ? winAsks : aggAsks.slice(0, depth);
+
+    // ── 5. build unified price axis ───────────────────────────────────────────
+    const allPrices = Array.from(
+      new Set([...useBids.map(x => x.price), ...useAsks.map(x => x.price)])
+    ).sort((a, b) => a - b);
+
+    if (allPrices.length === 0) {
+      return {
+        data: [], totals: { totalBidAmount: 0, totalAskAmount: 0, totalCost: 0 },
+        midPrice: mid, xTicks: [], yTicks: [0],
+      };
     }
 
-    // ensure data is dense enough but not excessively so: generate evenly spaced xTicks across min/max
-    const minPrice = prices.length ? prices[0] : (mid || 0);
-    const maxPrice = prices.length ? prices[prices.length - 1] : (mid || 0);
-    const priceRange = Math.max(1, maxPrice - minPrice);
-    const sampleCount = Math.min(8, Math.max(2, Math.floor(prices.length / Math.ceil(bucketSize / Math.max(1, Math.round(mid ? mid/100000 : 1))))));
+    // ── 6. cumulative curves (correct step-chart logic) ───────────────────────
+    //
+    // Bids  → cumulative from RIGHT to LEFT
+    //   at price P: sum of all bid buckets where bucket >= P
+    //   (how much you can sell at or above P)
+    //
+    // Asks  → cumulative from LEFT to RIGHT
+    //   at price P: sum of all ask buckets where bucket <= P
+    //   (how much you can buy at or below P)
+    //
+    // Both are pre-computed as prefix sums for O(n) instead of O(n²)
 
-    // create xTicks as linear samples across range (guarantees evenly spaced axis)
+    // asks prefix (left→right)
+    const askPrefix = new Map();
+    let askRunning = 0;
+    for (const p of allPrices) {
+      const bucket = askMap.get(p);
+      if (bucket) askRunning += bucket;
+      askPrefix.set(p, askRunning);
+    }
+
+    // bids prefix (right→left)
+    const bidPrefix = new Map();
+    let bidRunning = 0;
+    for (const p of [...allPrices].reverse()) {
+      const bucket = bidMap.get(p);
+      if (bucket) bidRunning += bucket;
+      bidPrefix.set(p, bidRunning);
+    }
+
+    const dataPoints = allPrices.map(p => ({
+      price: p,
+      bids:  bidPrefix.get(p) || 0,
+      asks:  askPrefix.get(p) || 0,
+    }));
+
+    // ── 7. x ticks (evenly spaced, snapped to priceGap) ──────────────────────
+    const minP  = allPrices[0];
+    const maxP  = allPrices[allPrices.length - 1];
+    const xStep = Math.max(priceGap, Math.round((maxP - minP) / 7));
     const xTicksArr = [];
-    const ticks = Math.min(8, Math.max(2, Math.ceil(prices.length / Math.max(1, Math.floor(prices.length / 8)))));
-    const step = Math.max(1, Math.floor(priceRange / (ticks - 1 || 1)));
-    for (let v = minPrice; v <= maxPrice; v += step) xTicksArr.push(v);
-    // ensure last tick is maxPrice
-    if (xTicksArr[xTicksArr.length - 1] !== maxPrice) xTicksArr.push(maxPrice);
+    for (let v = minP; v <= maxP; v += xStep) xTicksArr.push(v);
+    if (xTicksArr[xTicksArr.length - 1] !== maxP) xTicksArr.push(maxP);
 
-    // cumulative helpers
-    function cumBidAt(p) {
-      let s = 0;
-      for (const it of finalBids) if (it.price >= p) s += it.amount;
-      return s;
-    }
-    function cumAskAt(p) {
-      let s = 0;
-      for (const it of finalAsks) if (it.price <= p) s += it.amount;
-      return s;
-    }
-
-    // build data points by using the explicit prices array (keeps ordering consistent)
-    const dataPoints = prices.map((p) => ({ price: p, bids: cumBidAt(p), asks: cumAskAt(p) }));
-
-    // totals & y ticks
-    const totalBidAmount = finalBids.reduce((s, x) => s + x.amount, 0);
-    const totalAskAmount = finalAsks.reduce((s, x) => s + x.amount, 0);
-    const totalCost =
-      finalBids.reduce((s, x) => s + x.price * x.amount, 0) + finalAsks.reduce((s, x) => s + x.price * x.amount, 0);
-
-    const maxY = dataPoints.reduce((m, d) => Math.max(m, d.bids, d.asks), 1);
-    const exponent = Math.floor(Math.log10(Math.max(1, maxY)));
-    const yStep = Math.max(1, Math.pow(10, Math.max(0, exponent - 1)));
+    // ── 8. y ticks ────────────────────────────────────────────────────────────
+    const maxY  = dataPoints.reduce((m, d) => Math.max(m, d.bids, d.asks), 1);
+    const exp   = Math.floor(Math.log10(Math.max(1, maxY)));
+    const yStep = Math.max(1, Math.pow(10, Math.max(0, exp - 1)));
     const yTicksArr = [];
     for (let v = 0; v <= Math.ceil(maxY / yStep) * yStep; v += yStep) yTicksArr.push(v);
 
     return {
       data: dataPoints,
-      totals: { totalBidAmount, totalAskAmount, totalCost },
+      totals: {
+        totalBidAmount: useBids.reduce((s, x) => s + x.amount, 0),
+        totalAskAmount: useAsks.reduce((s, x) => s + x.amount, 0),
+        totalCost:
+          useBids.reduce((s, x) => s + x.price * x.amount, 0) +
+          useAsks.reduce((s, x) => s + x.price * x.amount, 0),
+      },
       midPrice: mid,
-      xTicks: xTicksArr,
-      yTicks: yTicksArr,
+      xTicks:   xTicksArr,
+      yTicks:   yTicksArr,
     };
-  }, [orders, lastPrice, depth]);
+  }, [orders, lastPrice, priceGap, depth]);
 
   return (
     <div className="relative text-gray-200 min-w-0">
-      {/* Header */}
       <div className="flex flex-col gap-1 sm:flex-row sm:justify-between sm:items-baseline mb-2">
         <div className="text-xs sm:text-sm">
           Depth{" "}
-          <span className="font-semibold text-green-400">{nf(totals.totalBidAmount, { maximumFractionDigits: 4 })}</span>{" "}
-          /{" "}
-          <span className="font-semibold text-red-400">{nf(totals.totalAskAmount, { maximumFractionDigits: 4 })}</span>
+          <span className="font-semibold text-green-400">
+            {nf(totals.totalBidAmount, { maximumFractionDigits: 4 })}
+          </span>
+          {" / "}
+          <span className="font-semibold text-red-400">
+            {nf(totals.totalAskAmount, { maximumFractionDigits: 4 })}
+          </span>
         </div>
         <div className="text-xs sm:text-sm">
-          Total Cost <span className="font-semibold text-red-400">{nf(totals.totalCost)}</span>
+          Total Cost{" "}
+          <span className="font-semibold text-red-400">{nf(totals.totalCost)}</span>
         </div>
       </div>
 
       <div className="text-center text-xs text-gray-300 mb-2">
         Mid Market{" "}
         <span className="font-semibold">
-          {midPrice ? nf(midPrice, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—"}
+          {midPrice
+            ? nf(midPrice, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+            : "—"}
         </span>
+        {priceGap > 1 && (
+          <span className="ml-2 text-yellow-400 text-xs">(gap {priceGap})</span>
+        )}
       </div>
 
-      {/* Chart */}
       <div className="h-48 sm:h-64 md:h-80 lg:h-[360px] min-w-0">
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={data} margin={{ top: 8, right: 36, left: 8, bottom: 24 }}>
@@ -247,12 +260,36 @@ export default function DepthChart({ lastPrice = null, wsUrl = "ws://localhost:8
               ]}
               labelFormatter={(v) => `Price: ${nf(v, { maximumFractionDigits: 0 })}`}
             />
-            <Area type="stepAfter" dataKey="bids" stroke="#10B981" fill="#063E30" fillOpacity={1} />
-            <Area type="stepAfter" dataKey="asks" stroke="#EF4444" fill="#3B0F11" fillOpacity={1} />
+            <Area
+              type="stepAfter"
+              dataKey="bids"
+              stroke="#10B981"
+              fill="#063E30"
+              fillOpacity={1}
+              isAnimationActive={false}
+            />
+            <Area
+              type="stepAfter"
+              dataKey="asks"
+              stroke="#EF4444"
+              fill="#3B0F11"
+              fillOpacity={1}
+              isAnimationActive={false}
+            />
             {midPrice != null && (
               <>
-                <ReferenceLine x={midPrice} stroke="rgba(156,163,175,0.8)" strokeDasharray="4 4" />
-                <ReferenceDot x={midPrice} y={0} r={5} fill="#ffffff" stroke="#111827" />
+                <ReferenceLine
+                  x={midPrice}
+                  stroke="rgba(156,163,175,0.8)"
+                  strokeDasharray="4 4"
+                />
+                <ReferenceDot
+                  x={midPrice}
+                  y={0}
+                  r={5}
+                  fill="#ffffff"
+                  stroke="#111827"
+                />
               </>
             )}
           </AreaChart>
