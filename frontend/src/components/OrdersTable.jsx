@@ -90,8 +90,8 @@ export default function OrdersTable(){
 
   return (
     <div className="bg-gray-800 p-3 rounded-md mt-2 min-w-0 overflow-x-auto">
-      <div className="text-xs text-gray-400 mb-1">Order</div>
-      <div className="grid grid-cols-8 gap-1 sm:gap-2 border-b border-gray-700 pb-2 text-gray-400 min-w-[520px]">
+      <div className="text-sm font-medium mb-2">Order</div>
+      <div className="grid grid-cols-8 gap-1 sm:gap-2 text-xs text-gray-400 mb-2 px-1 border-b border-gray-700 pb-2 min-w-[520px]">
         <div>Time Placed</div>
         <div>Type</div>
         <div>Side</div>
