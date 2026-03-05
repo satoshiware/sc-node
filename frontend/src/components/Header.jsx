@@ -4,7 +4,7 @@ import Profile from './Profile'
 
 const nf = (n, opts) => new Intl.NumberFormat(undefined, opts).format(n ?? 0);
 
-export default function Header({ setView }) {
+export default function Header({ setView, user, onSignOut }) {
   const [stats, setStats] = useState({});
   const wsRef = useRef(null);
   const reconnectRef = useRef(null);
@@ -139,7 +139,7 @@ export default function Header({ setView }) {
           </button>
         </nav>
 
-        <Profile />
+        <Profile user={user} onSignOut={onSignOut} />
       </div>
     </header>
   );

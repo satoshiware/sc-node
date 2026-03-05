@@ -9,19 +9,38 @@ import OrdersTable from './components/OrdersTable'
 import OrderManagement from './components/OrderManagement'
 import Wallet from './components/Wallet'
 import Exchange from './components/Exchange'
+import Login from './components/Login'
 
 export default function App(){
   const [view, setView] = useState('home')
   const [priceGap, setPriceGap] = useState(1)
+  const [user, setUser] = useState(() => {
+    const stored = localStorage.getItem('app_user')
+    return stored ? JSON.parse(stored) : null
+  })
+
+  function handleLogin(userData) {
+    setUser(userData)
+    localStorage.setItem('app_user', JSON.stringify(userData))
+  }
+
+  function handleSignOut() {
+    setUser(null)
+    localStorage.removeItem('app_user')
+  }
+
+  if (!user) {
+    return <Login onLogin={handleLogin} />
+  }
 
   return (
     <div className="min-h-screen p-2 sm:p-4">
-      {view === 'home' && <Header setView={setView} />}
+      {view === 'home' && <Header setView={setView} user={user} onSignOut={handleSignOut} />}
 
       {view === 'orders' ? (
-        <OrderManagement setView={setView} />
+        <OrderManagement setView={setView} user={user} onSignOut={handleSignOut} />
       ) : view === 'wallet' ? (
-        <Wallet setView={setView} />
+        <Wallet setView={setView} user={user} onSignOut={handleSignOut} />
       ) : view === 'exchange' ? (
         <Exchange setView={setView} />
       ) : (

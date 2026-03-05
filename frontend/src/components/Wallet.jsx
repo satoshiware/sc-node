@@ -4,7 +4,7 @@ import Profile from './Profile'
 import Deposit from './Deposite'
 import ManageFunds from './ManageFunds'
 
-export default function Wallet({ setView }){
+export default function Wallet({ setView, user, onSignOut }){
   const [assets] = useState([
     { id: 'BTC', name: 'BTC-SATS', total: '0.01234567', limits: '—', available: '0.01000000', history: [
       { date: '2026-02-01', time: '12:12:12', dir: 'in', amount: '0.00500000' },
@@ -45,7 +45,7 @@ export default function Wallet({ setView }){
           <div className="flex flex-wrap items-center gap-2 md:gap-3">
             <Deposit />
             <ManageFunds />
-            <Profile />
+            <Profile user={user} onSignOut={onSignOut} />
           </div>
         </div>
 

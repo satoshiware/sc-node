@@ -5,7 +5,7 @@ import Profile from './Profile'
 import Deposit from './Deposite'
 import ManageFunds from './ManageFunds'
 
-export default function OrderManagement({ setView }){
+export default function OrderManagement({ setView, user, onSignOut }){
   return (
     <div className="min-h-screen p-2 sm:p-4">
       <div className="sticky top-0 z-30 bg-gray-900/60 backdrop-blur-sm px-3 py-2 rounded-b-md mb-4 flex items-center justify-between">
@@ -34,7 +34,7 @@ export default function OrderManagement({ setView }){
           <div className="flex flex-wrap items-center gap-2 md:gap-3">
             <Deposit />
             <ManageFunds />
-            <Profile />
+            <Profile user={user} onSignOut={onSignOut} />
           </div>
         </div>
 
