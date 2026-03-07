@@ -317,6 +317,16 @@ touch /var/log/azcoin/wallet_events.log
 chown azcoin:azcoin /var/log/azcoin/wallet_events.log
 chmod 640 /var/log/azcoin/wallet_events.log
 
+# ===================== Add azc alias if it does not already exist =====================
+TARGET="/etc/bash.bashrc"
+AZC_ALIAS="alias azc='sudo -u azcoin azcoin-cli -conf=/etc/azcoin/azcoin.conf -datadir=/var/lib/azcoin'"
+if ! grep -Fxq "$AZC_ALIAS" "$TARGET"; then
+    echo "$AZC_ALIAS" | tee -a "$TARGET" > /dev/null
+    log "Added azc alias to $TARGET"
+else
+    log "azc alias already present"
+fi
+
 # ===================== README =====================
 log "Creating system-wide documentation README..."
 mkdir -p "${README_DIR}"
@@ -325,6 +335,7 @@ chmod 755 "${README_DIR}"
 
 cat > "${README_FILE}" << EOF
 # SC Node - AZCoin Core (Bare Metal)
+- Use the "azc" alias to invoke the command-line interface
 
 ## Key Files
 - binaries directory: /usr/local/bin (755 root:root)

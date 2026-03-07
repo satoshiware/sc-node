@@ -319,6 +319,16 @@ touch /var/log/bitcoin/wallet_events.log
 chown bitcoin:bitcoin /var/log/bitcoin/wallet_events.log
 chmod 640 /var/log/bitcoin/wallet_events.log
 
+# ===================== Add btc alias if it does not already exist =====================
+TARGET="/etc/bash.bashrc"
+BTC_ALIAS="alias btc='sudo -u bitcoin bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin'"
+if ! grep -Fxq "$BTC_ALIAS" "$TARGET"; then
+    echo "$BTC_ALIAS" | tee -a "$TARGET" > /dev/null
+    log  "Added btc alias to $TARGET"
+else
+    log  "btc alias already present"
+fi
+
 # ===================== README =====================
 log "Creating system-wide documentation README..."
 mkdir -p "${README_DIR}"
@@ -327,6 +337,7 @@ chmod 755 "${README_DIR}"
 
 cat > "${README_FILE}" << EOF
 # SC Node - Bitcoin Core (Bare Metal)
+- Use the "btc" alias to invoke the command-line interface
 
 ## Key Files
 - binaries directory: /usr/local/bin (755 root:root)
