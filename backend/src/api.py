@@ -150,7 +150,7 @@ async def startup_event():
 class PlaceOrderRequest(BaseModel):
     side: str
     type: str
-    price: float
+    price: float | None = None
     quantity: float
 
 class OrderResponse(BaseModel):
@@ -298,7 +298,7 @@ async def websocket_trades(websocket: WebSocket):
 async def websocket_candles(websocket: WebSocket):
     await candles_manager.connect(websocket)
     try:
-        candles = get_historical_candles(limit=120)
+        candles = get_historical_candles(limit=25920)
         await websocket.send_json({
             "type": "initial",
             "candles": candles

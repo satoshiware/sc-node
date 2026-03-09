@@ -95,20 +95,20 @@ export default function LeftChart({ priceGap = 1 }) {
   }, [])
 
   function buildChartDatasets(candles) {
-    // candles: [{time, open, high, low, close, volume}, ...]
     const candleDs = candles.map(c => ({
-      x: new Date(c.time).getTime(),
+      // force UTC parse: append 'Z' if no timezone info present
+      x: new Date(c.time.includes('Z') || c.time.includes('+') ? c.time : c.time + 'Z').getTime(),
       o: c.open,
       h: c.high,
       l: c.low,
       c: c.close,
     }))
     const volDs = candles.map(c => ({
-      x: new Date(c.time).getTime(),
+      x: new Date(c.time.includes('Z') || c.time.includes('+') ? c.time : c.time + 'Z').getTime(),
       y: c.volume,
     }))
     const candleColors = candles.map(c =>
-      c.close >= c.open ? '#064e3b' : '#7f1d1d'
+      c.close >= c.open ? 'rgba(16,185,129,0.9)' : 'rgba(239,68,68,0.9)'
     )
     const volColors = candles.map(c =>
       c.close >= c.open ? 'rgba(16,185,129,0.9)' : 'rgba(239,68,68,0.9)'
@@ -122,7 +122,13 @@ export default function LeftChart({ priceGap = 1 }) {
         barPercentage: 0.45,
         categoryPercentage: 0.6,
         borderColor: candleColors,
-        borderWidth: 1,
+        backgroundColor: candleColors,
+        borderWidth: 1.5,
+        color: {
+          up:        'rgba(16,185,129,0.9)',
+          down:      'rgba(239,68,68,0.9)',
+          unchanged: 'rgba(156,163,175,0.9)',
+        },
       }]
     })
     setVolumeData({
@@ -136,7 +142,10 @@ export default function LeftChart({ priceGap = 1 }) {
   }
 
   function applyUpdate(candle) {
-    const ts = new Date(candle.time).getTime()
+    // same fix — force UTC parse
+    const ts = new Date(
+      candle.time.includes('Z') || candle.time.includes('+') ? candle.time : candle.time + 'Z'
+    ).getTime()
 
     setCandleData(prev => {
       if (!prev) return prev
@@ -144,18 +153,22 @@ export default function LeftChart({ priceGap = 1 }) {
       const last = data[data.length - 1]
       const isGreen = candle.close >= candle.open
       const borderColor = [...(prev.datasets[0].borderColor || [])]
+      const bgColor = [...(prev.datasets[0].backgroundColor || [])]
+      const color = isGreen ? 'rgba(16,185,129,0.9)' : 'rgba(239,68,68,0.9)'
 
       if (last && last.x === ts) {
         // mutate current candle in place
         data[data.length - 1] = { x: ts, o: candle.open, h: candle.high, l: candle.low, c: candle.close }
-        borderColor[borderColor.length - 1] = isGreen ? '#064e3b' : '#7f1d1d'
+        borderColor[borderColor.length - 1] = color
+        bgColor[bgColor.length - 1] = color
       } else {
         // new candle
         data.push({ x: ts, o: candle.open, h: candle.high, l: candle.low, c: candle.close })
-        borderColor.push(isGreen ? '#064e3b' : '#7f1d1d')
-        if (data.length > MAX_CANDLES) { data.splice(0, data.length - MAX_CANDLES); borderColor.splice(0, borderColor.length - MAX_CANDLES) }
+        borderColor.push(color)
+        bgColor.push(color)
+        if (data.length > MAX_CANDLES) { data.splice(0, data.length - MAX_CANDLES); borderColor.splice(0, borderColor.length - MAX_CANDLES); bgColor.splice(0, bgColor.length - MAX_CANDLES) }
       }
-      return { ...prev, datasets: [{ ...prev.datasets[0], data, borderColor }] }
+      return { ...prev, datasets: [{ ...prev.datasets[0], data, borderColor, backgroundColor: bgColor }] }
     })
 
     setVolumeData(prev => {
@@ -231,23 +244,27 @@ export default function LeftChart({ priceGap = 1 }) {
   const computeXRange = () => {
     if (!candleData || !candleData.datasets?.[0]?.data?.length) return {}
     const data = candleData.datasets[0].data
+    if (data.length < 2) return {}
+
     const xs = data.map(d => d.x).sort((a, b) => a - b)
     const minAll = xs[0]
-    const maxAll = xs[xs.length - 1]
+    const maxAll = xs[xs.length - 1]                       // ← last CANDLE, not Date.now()
     if (minAll === maxAll) return {}
 
-    const totalSpan = maxAll - minAll
-    const windowPercent = 30 // visible window size (% of full range)
-    const clampedPos = Math.min(100, Math.max(0, viewPosition))
-    const rightFrac = clampedPos / 100
-    const right = minAll + totalSpan * rightFrac
-    const windowSpan = (totalSpan * windowPercent) / 100
-    let left = right - windowSpan
-    if (left < minAll) {
-      left = minAll
-    }
+    const totalSpan   = maxAll - minAll
+    const windowSize  = Math.max(1, Math.ceil(data.length * 0.30)) // show 30% of candle count
+    const windowSpan  = (windowSize / data.length) * totalSpan
+
+    // slider 0 = left edge of data, 100 = right edge of data (last candle)
+    const clampedPos  = Math.min(100, Math.max(0, viewPosition))
+    const scrollable  = totalSpan - windowSpan             // how far we can pan
+    const offset      = (clampedPos / 100) * scrollable
+    const left        = minAll + offset
+    const right       = left + windowSpan
+
     return { min: left, max: right }
   }
+
 
   const xRange = computeXRange()
 
@@ -264,9 +281,16 @@ export default function LeftChart({ priceGap = 1 }) {
     scales: {
       x: {
         type: 'time',
-        time: { unit: 'second', displayFormats: { second: 'HH:mm:ss' } },
+        time: {
+          unit: 'second',
+          displayFormats: {
+            second: 'h:mm:ss a',       // ← 2:32:10 PM
+            minute: 'h:mm a',          // ← 2:32 PM
+          },
+          tooltipFormat: 'dd MMM h:mm:ss a',   // ← 09 Mar 2:32:10 PM
+        },
         ticks: { color: '#9CA3AF', maxTicksLimit: 8 },
-        grid: { color: 'rgba(255,255,255,0.03)' },
+        grid:  { color: 'rgba(255,255,255,0.03)' },
         ...xRange,
       },
       y: {
@@ -289,7 +313,14 @@ export default function LeftChart({ priceGap = 1 }) {
     scales: {
       x: {
         type: 'time',
-        time: { unit: 'second', displayFormats: { second: 'HH:mm:ss' } },
+        time: {
+          unit: 'second',
+          displayFormats: {
+            second: 'h:mm:ss a',       // ← 2:32:10 PM
+            minute: 'h:mm a',          // ← 2:32 PM
+          },
+          tooltipFormat: 'dd MMM h:mm:ss a',   // ← 09 Mar 2:32:10 PM
+        },
         ticks: { color: '#9CA3AF', maxTicksLimit: 8 },
         ...xRange,
       },

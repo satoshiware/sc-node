@@ -117,8 +117,13 @@ export default function DepthChart({
     const winBids = aggBids.filter(x => inWindow(x.price));
     const winAsks = aggAsks.filter(x => inWindow(x.price));
 
+    // chart data — windowed slice
     const useBids = winBids.length ? winBids : aggBids.slice(0, depth);
     const useAsks = winAsks.length ? winAsks : aggAsks.slice(0, depth);
+
+    // totals — ALL bucketed orders, not just the chart window
+    const totalBids = aggBids;   // ← full list, not windowed
+    const totalAsks = aggAsks;   // ← full list, not windowed
 
     // ── 5. build unified price axis ───────────────────────────────────────────
     const allPrices = Array.from(
@@ -186,11 +191,11 @@ export default function DepthChart({
     return {
       data: dataPoints,
       totals: {
-        totalBidAmount: useBids.reduce((s, x) => s + x.amount, 0),
-        totalAskAmount: useAsks.reduce((s, x) => s + x.amount, 0),
+        totalBidAmount: totalBids.reduce((s, x) => s + x.amount, 0),  // ← was useBids
+        totalAskAmount: totalAsks.reduce((s, x) => s + x.amount, 0),  // ← was useAsks
         totalCost:
-          useBids.reduce((s, x) => s + x.price * x.amount, 0) +
-          useAsks.reduce((s, x) => s + x.price * x.amount, 0),
+          totalBids.reduce((s, x) => s + x.price * x.amount, 0) +
+          totalAsks.reduce((s, x) => s + x.price * x.amount, 0),
       },
       midPrice: mid,
       xTicks:   xTicksArr,

@@ -4,19 +4,21 @@ import Profile from './Profile'
 import Deposit from './Deposite'
 import ManageFunds from './ManageFunds'
 
-export default function Wallet({ setView, user, onSignOut }){
-  const [assets] = useState([
+export default function Wallet({ setView, user, onSignOut, balances }){
+  const azc  = balances?.azc  ?? 133.66
+  const sats = balances?.sats ?? 50000
+
+  const assets = [
     { id: 'BTC', name: 'BTC-SATS', total: '0.01234567', limits: '—', available: '0.01000000', history: [
       { date: '2026-02-01', time: '12:12:12', dir: 'in', amount: '0.00500000' },
       { date: '2026-01-20', time: '09:05:34', dir: 'out', amount: '0.00200000' },
     ]},
-    { id: 'AZC', name: 'AZC-SATS', total: '1.76543210', limits: '—', available: '1.76543210', history: [
+    { id: 'AZC', name: 'AZC-SATS', total: azc.toFixed(8), limits: '—', available: azc.toFixed(8), history: [
       { date: '2026-01-25', time: '16:29:24', dir: 'in', amount: '0.50000000' },
     ]},
-    { id: 'USD', name: 'USD-SATS', total: '100.00', limits: '—', available: '100.00', history: []},
-
-    
-  ])
+    { id: 'SATS', name: 'SATS', total: sats.toLocaleString(), limits: '—', available: sats.toLocaleString(), history: [] },
+    { id: 'USD', name: 'USD', total: '100.00', limits: '—', available: '100.00', history: [] },
+  ]
 
   const [selected, setSelected] = useState(null)
 

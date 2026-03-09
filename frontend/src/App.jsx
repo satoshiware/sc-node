@@ -14,6 +14,7 @@ import Login from './components/Login'
 export default function App(){
   const [view, setView] = useState('home')
   const [priceGap, setPriceGap] = useState(1)
+  const [balances, setBalances] = useState({ azc: 133.66, sats: 50000 }) // Initial balances for testing
   const [user, setUser] = useState(() => {
     const stored = localStorage.getItem('app_user')
     return stored ? JSON.parse(stored) : null
@@ -40,7 +41,7 @@ export default function App(){
       {view === 'orders' ? (
         <OrderManagement setView={setView} user={user} onSignOut={handleSignOut} />
       ) : view === 'wallet' ? (
-        <Wallet setView={setView} user={user} onSignOut={handleSignOut} />
+        <Wallet setView={setView} user={user} onSignOut={handleSignOut} balances={balances} />
       ) : view === 'exchange' ? (
         <Exchange setView={setView} />
       ) : (
@@ -69,7 +70,7 @@ export default function App(){
               <TradeHistory />
             </div>
 
-            <BuyPanel />
+            <BuyPanel balances={balances} />
           </div>
         </div>
       )}

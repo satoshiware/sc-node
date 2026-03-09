@@ -2,17 +2,17 @@ import math
 from datetime import datetime, timedelta
 from db import get_connection
 
-CANDLE_INTERVAL = 5  # seconds
+CANDLE_INTERVAL = 10  # seconds (10-second candles)
 
 def get_candle_timestamp(dt):
-    """Round datetime down to nearest 5-second bucket"""
+    """Round datetime down to nearest 10-second bucket"""
     ts = dt.timestamp()
     bucket = math.floor(ts / CANDLE_INTERVAL) * CANDLE_INTERVAL
     return datetime.fromtimestamp(bucket)
 
 def aggregate_trades_to_candles(trades):
     """
-    Convert a list of trade dicts to OHLCV candles (5-second windows).
+    Convert a list of trade dicts to OHLCV candles (10-second windows).
     Open  = first trade price in window
     High  = max trade price
     Low   = min trade price
@@ -70,7 +70,7 @@ def aggregate_trades_to_candles(trades):
         for c in candles
     ]
 
-def get_historical_candles(limit=120):
+def get_historical_candles(limit=25920):
     """Fetch all trades and return last `limit` OHLCV candles (ascending)."""
     conn = get_connection()
     cur  = conn.cursor()
@@ -89,7 +89,7 @@ def get_historical_candles(limit=120):
     return candles[-limit:] if len(candles) > limit else candles
 
 def get_current_candle():
-    """Return the candle for the current 5-second window (may be incomplete)."""
+    """Return the candle for the current 10-second window (may be incomplete)."""
     conn = get_connection()
     cur  = conn.cursor()
     now  = datetime.now()
