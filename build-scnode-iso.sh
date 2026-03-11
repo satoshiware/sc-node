@@ -79,7 +79,6 @@ echo "Select architecture:"
 select ARCH in "${ARCHES[@]}"; do [[ -n "$ARCH" ]] && break; done
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Dynamic ISO name/version
 # Dynamic Debian ISO
 # ──────────────────────────────────────────────────────────────────────────────
 DIR_URL="${BASE_URL}/${ARCH}/iso-dvd/"
@@ -89,10 +88,11 @@ ISO_NAME="debian-${ISO_NAME}"
 ISO_URL="${DIR_URL}${ISO_NAME}"
 HASH_URL="${DIR_URL}SHA256SUMS"
 SIG_URL="${HASH_URL}.sign"
+
 echo ""; echo "Download locations:"
-echo " ISO URL: $ISO_URL"
-echo " HASH URL: $HASH_URL"
-echo " SIG URL: $SIG_URL"; echo ""
+echo " ISO:   $ISO_URL"
+echo " SHA:   $HASH_URL"
+echo " SIG:   $SIG_URL"; echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Download & verify Debian ISO
