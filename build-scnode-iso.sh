@@ -2,16 +2,18 @@
 # =============================================================================
 # Creates a bootable Debian full install .iso (based on Debian's DVD-1)
 # Modified for SC Node setup automation:
-# Preseeded with preseed.cfg
-# Injects sc-node repo contents + binaries into the ISO filesystem
+#   Preseeded with preseed.cfg
+#   Injects sc-node repo contents + binaries into the ISO filesystem
 #
 # REQUIRES:
 #   curl gnupg rsync xorriso (auto-installed if missing)
-#   Run as root
 #   16 GB of free space
 #
-# NOTES:
-#   Files are not deleted upon exit
+# RUN FROM THE PARENT DIRECTORY like this:
+#   sudo ./sc-node/build-scnode-iso.sh
+#
+# The script lives inside the sc-node/ folder but writes temp files and the
+# final ISO to the parent directory (keeps repo folder clean).
 # =============================================================================
 set -euo pipefail # Catch and exit on all errors
 
@@ -19,22 +21,28 @@ set -euo pipefail # Catch and exit on all errors
 # Enforce running as root
 # ──────────────────────────────────────────────────────────────────────────────
 if [ "$EUID" -ne 0 ]; then
-    echo "This script must be run as root (sudo ./build-scnode-iso.sh)"
+    echo "This script must be run as root (sudo ./sc-node/build-scnode-iso.sh)"
     exit 1
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Verify we are in the sc-node repo root
+# Verify the sc-node repo folder exists in current directory
 # ──────────────────────────────────────────────────────────────────────────────
-if [[ ! -f "./sc-node/preseed.cfg" || ! -f "./sc-node/setup.sh" || ! -d "sc-node" ]]; then
-    echo "Expected files/directories not found in current directory: $(pwd)"
+REPO_DIR="./sc-node"
+if [[ ! -d "$REPO_DIR" || ! -f "$REPO_DIR/preseed.cfg" || ! -f "$REPO_DIR/setup.sh" ]]; then
+    echo "Error: This script must be run from the parent directory of the sc-node repo."
+    echo "Expected structure:"
+    echo "  ./sc-node/build-scnode-iso.sh"
+    echo "  ./sc-node/preseed.cfg"
+    echo "  ./sc-node/setup.sh"
+    echo "Current directory: $(pwd)"
     exit 1
 fi
 
 # Config
 BASE_URL="https://cdimage.debian.org/debian-cd/current"
 TEMP_DIR="./tmp-debian-files"
-PRESEED_DEFAULT="./sc-node/preseed.cfg"
+PRESEED_DEFAULT="${REPO_DIR}/preseed.cfg"
 DEBIAN_KEY_ID="0x6294BE9B"
 ARCHES=("amd64" "arm64" "ppc64el" "riscv64" "s390x")
 
@@ -51,7 +59,6 @@ echo "Checking/updating required tools..."
 
 REQUIRED_PKGS=(
     curl        # downloads
-    gnupg       # gpg verification
     rsync       # copy ISO contents
     xorriso     # preferred for hybrid ISO
 )
@@ -73,6 +80,7 @@ select ARCH in "${ARCHES[@]}"; do [[ -n "$ARCH" ]] && break; done
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Dynamic ISO name/version
+# Dynamic Debian ISO
 # ──────────────────────────────────────────────────────────────────────────────
 DIR_URL="${BASE_URL}/${ARCH}/iso-dvd/"
 ISO_NAME=$(curl -s "$DIR_URL" | grep -oP "debian-\K[0-9.]+\-${ARCH}-DVD-1\.iso" | head -1)
