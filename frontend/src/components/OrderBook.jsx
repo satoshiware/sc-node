@@ -3,15 +3,24 @@ import React, { useState, useEffect, useRef } from 'react'
 const PRICE_GAP_OPTIONS = [1, 5, 10, 25, 50, 100, 250, 500]
 
 function Row({ price, amount, side }) {
+  const priceEl = (
+    <span className={side === 'ask' ? 'text-red-400' : 'text-green-400'}>
+      {price}
+    </span>
+  )
   return (
-    <div className="flex justify-between text-sm text-gray-300">
-      <div>{amount}</div>
-      <div className={side === 'ask'
-        ? 'text-red-400 text-right'
-        : 'text-green-400 text-right'}
-      >
-        {price}
-      </div>
+    <div className="flex justify-between text-xs sm:text-sm text-gray-300 gap-2 min-w-0">
+      {side === 'ask' ? (
+        <>
+          <div className="min-w-0 truncate">{amount}</div>
+          <div className="text-right min-w-0 truncate shrink-0">{priceEl}</div>
+        </>
+      ) : (
+        <>
+          <div className="text-right min-w-0 truncate shrink-0">{priceEl}</div>
+          <div className="min-w-0 truncate">{amount}</div>
+        </>
+      )}
     </div>
   )
 }
@@ -104,7 +113,7 @@ export default function OrderBook({ priceGap, onPriceGapChange }) {
   return (
     <div className="bg-gray-800 p-3 rounded-md min-w-0 ">
 
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
 
         <div className="text-sm font-medium">
           Order Book
@@ -146,7 +155,7 @@ export default function OrderBook({ priceGap, onPriceGapChange }) {
       </div>
 
       {/* ROW DEPTH CONTROL */}
-      <div className="flex items-center space-x-1 mb-3">
+      <div className="flex flex-wrap items-center space-x-1 mb-3">
         <span className="text-xs text-gray-400">Rows :</span>
 
         <button
@@ -168,32 +177,53 @@ export default function OrderBook({ priceGap, onPriceGapChange }) {
         </button>
       </div>
 
-      <div className="grid grid-cols-2 text-xs text-gray-400 mb-2 px-1 border-b border-gray-700 pb-2">
-        <div>Amount (AZC)</div>
-        <div className="text-right">Price (SATS)</div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs text-gray-400 mb-2 px-1 border-b border-gray-700 pb-2">
+        <div className="min-w-0">
+          <div className="font-medium text-red-400/90 mb-1">Sell (Asks)</div>
+          <div className="grid grid-cols-2 gap-1">
+            <div>Amount (AZC)</div>
+            <div className="text-right">Price (SATS)</div>
+          </div>
+        </div>
+        <div className="min-w-0 ">
+          <div className="font-medium text-green-400/90 mb-1">Buy (Bids)</div>
+          <div className="grid grid-cols-2 gap-1">
+            <div className="text-right">Price (SATS)</div>
+            <div>Amount (AZC)</div>
+          </div>
+        </div>
       </div>
 
-      <div className="space-y-1 overflow-y-auto h-80 pr-2 scrollbar-dark">
-        {[...asks].reverse().map((a, i) => (
-          <Row
-            key={`ask-${a.price}-${i}`}
-            price={a.price.toLocaleString()}
-            amount={a.amount.toFixed(8)}
-            side="ask"
-          />
-        ))}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 overflow-y-auto min-h-48 max-h-[26rem] md:h-80 md:max-h-none pr-2 scrollbar-dark">
+        {/* Left column: Asks (sells) */}
+        <div className="space-y-1 min-w-0">
+          {asks.map((a, i) => (
+            <Row
+              key={`ask-${a.price}-${i}`}
+              price={a.price.toLocaleString()}
+              amount={a.amount.toFixed(8)}
+              side="ask"
+            />
+          ))}
+          {asks.length === 0 && (
+            <div className="text-xs text-gray-500 py-2">No sell orders</div>
+          )}
+        </div>
 
-        {(asks.length > 0 || bids.length > 0) &&
-          <div className="h-px bg-gray-700 my-1" />}
-
-        {bids.map((b, i) => (
-          <Row
-            key={`bid-${b.price}-${i}`}
-            price={b.price.toLocaleString()}
-            amount={b.amount.toFixed(8)}
-            side="bid"
-          />
-        ))}
+        {/* Right column: Bids (buys) */}
+        <div className="space-y-1 min-w-0">
+          {bids.map((b, i) => (
+            <Row
+              key={`bid-${b.price}-${i}`}
+              price={b.price.toLocaleString()}
+              amount={b.amount.toFixed(8)}
+              side="bid"
+            />
+          ))}
+          {bids.length === 0 && (
+            <div className="text-xs text-gray-500 py-2">No buy orders</div>
+          )}
+        </div>
       </div>
 
     </div>
