@@ -2,12 +2,12 @@
 # =============================================================================
 # Creates a bootable Debian full install .iso (based on Debian's DVD-1)
 # Modified for SC Node setup automation:
-#   Preseeded with sc_node/preseed.cfg
-#   Injects sc_node repo into the base of the .iso's filesystem
+# Preseeded with preseed.cfg
+# Injects sc-node repo contents + binaries into the ISO filesystem
 #
 # REQUIRES:
-#   git curl gnupg rsync xorriso (auto-installed if missing)
-#   sudo privileges
+#   curl gnupg rsync xorriso (auto-installed if missing)
+#   Run as root
 #   16 GB of free space
 #
 # NOTES:
@@ -15,25 +15,34 @@
 # =============================================================================
 set -euo pipefail # Catch and exit on all errors
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Enforce running as root
+# ──────────────────────────────────────────────────────────────────────────────
+if [ "$EUID" -ne 0 ]; then
+    echo "This script must be run as root (sudo ./build-scnode-iso.sh)"
+    exit 1
+fi
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Verify we are in the sc-node repo root
+# ──────────────────────────────────────────────────────────────────────────────
+if [[ ! -f "./sc-node/preseed.cfg" || ! -f "./sc-node/setup.sh" || ! -d "sc-node" ]]; then
+    echo "Expected files/directories not found in current directory: $(pwd)"
+    exit 1
+fi
+
 # Config
 BASE_URL="https://cdimage.debian.org/debian-cd/current"
 TEMP_DIR="./tmp-debian-files"
-PRESEED_DEFAULT="preseed.cfg"           # Default file in script dir (optional)
-DEBIAN_KEY_ID="0x6294BE9B"                #  Created in 2011. Remains the primary key used to sign official stable ISO images.
-ARCHES=("amd64" "arm64" "ppc64el" "riscv64" "s390x") # List of 64 bit CPU types
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Make sure we have sudo privileges
-# ──────────────────────────────────────────────────────────────────────────────
-if [ "$(sudo -l | grep '(ALL : ALL) ALL' | wc -l)" = 0 ]; then
-    echo "You do not have enough sudo privileges!"; exit 1
-fi
+PRESEED_DEFAULT="./sc-node/preseed.cfg"
+DEBIAN_KEY_ID="0x6294BE9B"
+ARCHES=("amd64" "arm64" "ppc64el" "riscv64" "s390x")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Update and upgrade
 # ──────────────────────────────────────────────────────────────────────────────
 echo "Updating and upgrading..."; sleep 2
-sudo apt update && sudo apt upgrade -y
+apt update && apt upgrade -y
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Check/install required packages
@@ -41,19 +50,18 @@ sudo apt update && sudo apt upgrade -y
 echo "Checking/updating required tools..."
 
 REQUIRED_PKGS=(
-    git         # version control system (download repo's)
     curl        # downloads
     gnupg       # gpg verification
     rsync       # copy ISO contents
     xorriso     # preferred for hybrid ISO
 )
 
-sudo apt-get update -qq
+apt-get update -qq
 
 for pkg in "${REQUIRED_PKGS[@]}"; do
     if ! dpkg -s "$pkg" &>/dev/null; then
         echo "Installing: $pkg"
-        sudo apt-get install -yqq "$pkg"
+        apt-get install -yqq "$pkg"
     fi
 done
 
@@ -70,32 +78,26 @@ DIR_URL="${BASE_URL}/${ARCH}/iso-dvd/"
 ISO_NAME=$(curl -s "$DIR_URL" | grep -oP "debian-\K[0-9.]+\-${ARCH}-DVD-1\.iso" | head -1)
 [[ -z "$ISO_NAME" ]] && { echo "No DVD ISO found for $ARCH." >&2; exit 1; }
 ISO_NAME="debian-${ISO_NAME}"
-
 ISO_URL="${DIR_URL}${ISO_NAME}"
 HASH_URL="${DIR_URL}SHA256SUMS"
 SIG_URL="${HASH_URL}.sign"
-
 echo ""; echo "Download locations:"
-echo "    ISO URL: $ISO_URL"
-echo "    HASH URL: $HASH_URL"
-echo "    SIG URL: $SIG_URL"; echo ""
+echo " ISO URL: $ISO_URL"
+echo " HASH URL: $HASH_URL"
+echo " SIG URL: $SIG_URL"; echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Download & verify (dynamic keys via keyring)
+# Download & verify Debian ISO
 # ──────────────────────────────────────────────────────────────────────────────
 mkdir -p "$TEMP_DIR"
 cd "$TEMP_DIR"
-
 echo "Downloading ISO, SHA256SUMS, signature..."
 curl -LO -C - "$ISO_URL"
 curl -LO "$HASH_URL"
 curl -LO "$SIG_URL"
-
 gpg --keyserver keyring.debian.org --recv-keys $DEBIAN_KEY_ID
 gpg --verify SHA256SUMS.sign SHA256SUMS || { echo "GPG failed!"; exit 1; }
-
 grep -- "$ISO_NAME" SHA256SUMS | sha256sum -c - || { echo "Checksum failed!"; exit 1; }
-
 echo "Verification passed."
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -179,7 +181,5 @@ Output file: $(pwd)/modified.iso
 Size:       $(du -h modified.iso | cut -f1)
 
 IMPORTANT NOTES:
-  • Temporary files (tmp-debian-files/, extracted/, sc_node/, mnt/) are NOT deleted.
-    Clean up manually if desired: rm -rf tmp-debian-files extracted sc_node mnt
-  • For production: review preseed.cfg carefully (disk partitioning, passwords, etc.)
+  • Temporary files (tmp-debian-files/, extracted/, sc-node/, mnt/) are NOT deleted.
 EOF
