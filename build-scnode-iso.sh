@@ -59,6 +59,7 @@ echo "Checking/updating required tools..."
 
 REQUIRED_PKGS=(
     curl        # downloads
+    gnupg       # gpg verification
     rsync       # copy ISO contents
     xorriso     # preferred for hybrid ISO
 )
@@ -103,40 +104,32 @@ echo "Downloading ISO, SHA256SUMS, signature..."
 curl -LO -C - "$ISO_URL"
 curl -LO "$HASH_URL"
 curl -LO "$SIG_URL"
-gpg --keyserver keyring.debian.org --recv-keys $DEBIAN_KEY_ID
-gpg --verify SHA256SUMS.sign SHA256SUMS || { echo "GPG failed!"; exit 1; }
-grep -- "$ISO_NAME" SHA256SUMS | sha256sum -c - || { echo "Checksum failed!"; exit 1; }
-echo "Verification passed."
+
+gpg --keyserver keyring.debian.org --recv-keys "$DEBIAN_KEY_ID"
+gpg --verify SHA256SUMS.sign SHA256SUMS || { echo "GPG verify failed"; exit 1; }
+grep -- "$ISO_NAME" SHA256SUMS | sha256sum -c - || { echo "Checksum failed"; exit 1; }
+echo "Debian ISO verified."
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Add sc_node repo (including the preseed.cfg file) and modify the boot configuration (grub.cfg)
+# Extract ISO
 # ──────────────────────────────────────────────────────────────────────────────
 mkdir -p extracted mnt
-sudo mount -o loop "$ISO_NAME" mnt
-sudo rsync -a mnt/ extracted/
-sudo umount mnt
+mount -o loop "$ISO_NAME" mnt
+rsync -a mnt/ extracted/
+umount mnt
 
-# Clone sc_node repository to add to the iso. Used for installing and configuring new Sovereign Circle Nodes after Debian install.
-echo "Cloning SC_Node repository from GitHub..."
-sudo git clone https://github.com/satoshiware/sc_node.git sc_node || {
-    echo "Error: Failed to clone https://github.com/satoshiware/sc_node" >&2
-    exit 1
-}
+# ──────────────────────────────────────────────────────────────────────────────
+# Copy repo contents into ISO at /sc-node/
+# ──────────────────────────────────────────────────────────────────────────────
+echo "Copying sc-node repo contents into ISO filesystem..."
+rsync -a --exclude='.git' "../${REPO_DIR%/}/" extracted/sc-node
+find extracted/sc-node -type d -exec chmod 755 {} +
+find extracted/sc-node -type f -exec chmod 644 {} +
+find extracted/sc-node -type f -name "*.sh" -exec chmod +x {} \;
 
-# Copy sc_node cloned repo into the extracted filesystem (i.e. base directory of the future installed system).
-echo "Copying SC_Node repo contents (including the preseed.cfg file) into base directory..."
-sudo rsync -a --exclude='.git' sc_node/ extracted/sc_node
-
-# Set all directories w/ readable + executable/traversable permissions
-sudo find extracted/sc_node -type d -exec chmod 755 {} +
-
-# Set all files to read-only
-sudo find extracted/sc_node -type f -exec chmod 644 {} +
-
-# Make all .sh files executable (recursively)
-find extracted/sc_node -type f -name "*.sh" -exec sudo chmod +x {} \;
-
-# Inject GRUB auto-install params before the line with the first menuentry
+# ──────────────────────────────────────────────────────────────────────────────
+# Modify GRUB for preseeded auto-install
+# ──────────────────────────────────────────────────────────────────────────────
 echo "Modifying the boot configuration (grub.cfg) file..."; sleep 2
 awk '
 /^menuentry/ {
@@ -144,14 +137,14 @@ awk '
         print "set timeout=5"
         print "set default=0"
         print "menuentry \047Preseeded Auto Install\047 {"
-        print "    set background_color=black"
-        print "    linux    /install.amd/vmlinuz vga=788 file=/cdrom/sc_node/preseed.cfg auto=true priority=high --- quiet"
-        print "    initrd   /install.amd/initrd.gz"
+        print " set background_color=black"
+        print " linux /install.amd/vmlinuz vga=788 file=/cdrom/sc-node/preseed.cfg auto=true priority=high --- quiet"
+        print " initrd /install.amd/initrd.gz"
         print "}"
         print "menuentry \047Debug Preseeded Install\047 {"
-        print "    set background_color=black"
-        print "    linux    /install.amd/vmlinuz vga=788 DEBCONF_DEBUG=5 file=/cdrom/sc_node/preseed.cfg priority=low --- quiet"
-        print "    initrd   /install.amd/initrd.gz"
+        print " set background_color=black"
+        print " linux /install.amd/vmlinuz vga=788 DEBCONF_DEBUG=5 file=/cdrom/sc-node/preseed.cfg priority=low --- quiet"
+        print " initrd /install.amd/initrd.gz"
         print "}"
         inserted=1
     }
@@ -160,13 +153,56 @@ awk '
 ' extracted/boot/grub/grub.cfg > grub.tmp || { echo "awk failed" >&2; exit 1; }
 
 # Move updated grub.cfg to proper location and ensure root ownership and read-only permissions are set
-sudo mv grub.tmp ./extracted/boot/grub/grub.cfg
-sudo chown root:root ./extracted/boot/grub/grub.cfg
-sudo chmod 444 ./extracted/boot/grub/grub.cfg
+mv grub.tmp ./extracted/boot/grub/grub.cfg
+chown root:root ./extracted/boot/grub/grub.cfg
+chmod 444 ./extracted/boot/grub/grub.cfg
 
-# Verify preseed.cfg syntax
-echo "Checking preseed syntax ... "
-debconf-set-selections -c ./extracted/sc_node/preseed.cfg || { echo "Preseed syntax validation FAILED!"; cat preseed-validate.err; exit 1; } && echo "Preseed OK"
+# Verify preseed
+echo "Checking preseed syntax..."
+debconf-set-selections -c "../${REPO_DIR}/preseed.cfg" || { echo "Preseed syntax FAILED"; exit 1; }
+echo "Preseed OK"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Bitcoin Core binaries (unchanged from previous version)
+# ──────────────────────────────────────────────────────────────────────────────
+echo "Downloading and verifying latest Bitcoin Core binaries..."
+BITCOIN_BASE="https://bitcoincore.org/bin"
+LATEST_VER=$(curl -s "$BITCOIN_BASE/" | grep -oP 'bitcoin-core-\K[0-9.]+(?=/)' | sort -V | tail -1)
+[[ -z "$LATEST_VER" ]] && { echo "Could not detect latest Bitcoin Core version"; exit 1; }
+
+BITCOIN_DIR="$BITCOIN_BASE/bitcoin-core-${LATEST_VER}"
+BIN_NAME="bitcoin-${LATEST_VER}-${ARCH}-linux-gnu.tar.gz"
+SHA256_URL="${BITCOIN_DIR}/SHA256SUMS"
+SIG_URL="${BITCOIN_DIR}/SHA256SUMS.asc"
+
+mkdir -p binaries/bitcoin-core
+cd binaries/bitcoin-core
+curl -LO "${BITCOIN_DIR}/${BIN_NAME}"
+curl -LO "$SHA256_URL"
+curl -LO "$SIG_URL"
+
+gpg --keyserver hkps://keys.openpgp.org --recv-keys 01EA5486DE18A882D4C2684590C8019E36C2E964
+gpg --verify SHA256SUMS.asc SHA256SUMS || { echo "Bitcoin SHA256SUMS sig failed"; exit 1; }
+grep "${BIN_NAME}" SHA256SUMS | sha256sum -c - || { echo "Bitcoin Core checksum failed"; exit 1; }
+
+echo "Bitcoin Core v${LATEST_VER} verified."
+tar -xzf "${BIN_NAME}"
+mkdir -p ../../extracted/sc-node/binaries/bitcoin-core
+cp -r bitcoin-${LATEST_VER}/* ../../extracted/sc-node/binaries/bitcoin-core/
+cd - >/dev/null
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AZCoin placeholder
+# ──────────────────────────────────────────────────────────────────────────────
+echo "AZCoin: No pre-built binaries yet[](https://github.com/satoshiware/azcoin)"
+echo "Build manually with cross-compile.sh and place in ../azcoin-binaries/"
+if [ -d "../azcoin-binaries" ]; then
+    mkdir -p extracted/sc-node/binaries/azcoin
+    rsync -a ../azcoin-binaries/ extracted/sc-node/binaries/azcoin/
+    echo "AZCoin binaries copied."
+else
+    echo "No ../azcoin-binaries/ — skipping."
+fi
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Rebuild hybrid ISO (UEFI boot only)
@@ -175,19 +211,22 @@ echo "Building modified ISO..."
 xorriso -as mkisofs -o ../modified.iso \
     -eltorito-alt-boot -e boot/grub/efi.img -no-emul-boot \
     -J -R -V 'Debian Preseed Installer' extracted/
-
 [[ -f ../modified.iso ]] || { echo "ISO build failed"; exit 1; }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Inform user of success
+# Success message
 # ──────────────────────────────────────────────────────────────────────────────
-cd ..; cat <<EOF
+cd ..
+cat <<EOF
 =============================================================================
-  SC Node Preseeded Debian Installer ISO successfully created!
+  SC Node Preseeded Debian Installer ISO created!
 =============================================================================
-Output file: $(pwd)/modified.iso
-Size:       $(du -h modified.iso | cut -f1)
+Output: $(pwd)/modified.iso
+Size:   $(du -h modified.iso | cut -f1)
 
-IMPORTANT NOTES:
-  • Temporary files (tmp-debian-files/, extracted/, sc-node/, mnt/) are NOT deleted.
+Binaries:
+- Bitcoin Core v${LATEST_VER} (verified)
+- AZCoin: manual build required
+
+Cleanup: rm -rf tmp-debian-files extracted mnt
 EOF
