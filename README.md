@@ -13,12 +13,9 @@ The SC Node (Sovereign Circle Node) is a low-cost, self-hosted mini-PC setup des
 ## Hardware Specifications
 * RAM: 32 GB
 * SSD: 2 TB
-* CPU: 4 Cores (Must Support Virtualization, i.e., Hyper-V Capable)
+* CPU: 4-core processor with fTPM 2.0 support (required for encrypted disk)
 * Networking: Gigabit Ethernet
-* Power: Low-Power Consumption (<50W)
-
-## Proxmox VE
-Proxmox VE serves as the foundational hypervisor for the SC Node, providing robust virtualization capabilities for running all associated software components efficiently on a single hardware platform. To ensure secure and simplified network exposure, the SC Node is configured with NAT addressing, presenting only a single external IP address to the broader network while handling internal traffic for VMs and containers. By default, the device name is set to "SC Node", but can be easily configured in the SC Node install script.
+* Power: <50 W
 
 ## Architecture
 ### AZCoin Full Node w/ Basic Configuration
@@ -87,50 +84,146 @@ Proxmox VE serves as the foundational hypervisor for the SC Node, providing robu
 * Cold Storage Management
 * See Overall Mining Stats & Payouts
 
-## Docker (Bitcoin Core)
-A Docker image and Compose file mirror the bare-metal Bitcoin Core setup from `bitcoin-install.sh` (pruned node, RPC, ZMQ, wallet). They are separate implementations—if you change `bitcoin-install.sh`, update the Dockerfile and `docker-entrypoint.sh` to match. From the repo root:
+## Build & Release the Sovereign Circle Node ISO
+Steps to create a custom, hands-free installation ISO for the Sovereign Circle Node.
+It uses the build-scnode-iso.sh script found in the SC Node repository: https://github.com/satoshiware/sc-node.
+This script always uses the tip of the master branch.
 
-- **Build and run:** `docker compose up -d`
-- **RPC (e.g. getblockchaininfo):**  
-  On **PowerShell**, quote arguments so `.conf` is not stripped:  
-  `docker compose exec bitcoind bitcoin-cli "-conf=/etc/bitcoin/bitcoin.conf" "-datadir=/var/lib/bitcoin" getblockchaininfo`  
-  On Linux/macOS: `docker compose exec bitcoind bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getblockchaininfo`
-- **RPC password:** `docker compose exec bitcoind cat /home/bitcoin/rpcpassword`
+1. On Linux with **sudo** privileges, clone the repository:
+- sudo apt update && sudo apt upgrade -y && sudo apt install -y git
+- git clone https://github.com/satoshiware/sc-node
 
-## Build Installation ISO
-Download and execute the sc_node/build-scnode-iso.sh script, on linux, in any $USER directory w/ sudo privileges. Once complete, the iso (named "modified.iso") will have been remastered into the execution directory. *Note: This project does **not** involve traditional compilation of source code.  Instead, it **remasters** an official Debian DVD-1 ISO (stable release) with the following changes:*
+2. Run the build script:
+- sudo chmod +x ./sc-node/build-scnode-iso.sh
+- sudo ./sc-node/build-scnode-iso.sh
 
-- sc_node`s preseed file (sc_node/preseed.cfg) is configured for full automated installation
-- The entire `sc_node` repository is added to the target filesystem (/root/sc_node)
-- GRUB boot menu is configured to offer preseeded auto-install (and debug) options where the auto-install will auto run within 5 seconds
+This script:
+- Downloads the latest official **Debian** DVD-1 ISO (~4.7 GB base).
+- Remasters it (no source compilation).
+- Integrates `preseed.cfg` for fully automated install.
+- Copies the entire `sc-node` repository to `/root/sc-node` in the target filesystem.
+- Downloads and verifies required binaries (Bitcoin, AZCoin, Stratum, Lightning, etc.) that will be installed via the `setup.sh` script.
+- Modifies ISO GRUB boot menu to offer preseeded **auto-install** (starts after 5 seconds) and **debug** options.
 
-The end result is a bootable ISO that performs a hands-free Debian installation tailored to be a Sovereign Circle Node. As the install is completed on a new SC Node, the system is configured to run the setup script (sc_node/setup.sh), launched by the firstboot.sh script, on first boot. The preseed.cfg and late_commands.sh files govern this configuration. **WARNING! A USB with this ISO will delete the first non-removable disk with maximum LVM partition automatically and without any prompts!!!**
+Once complete, the script outputs a non-versioned ISO w/ the chosen CPU type: e.g., `sc-node-X.X.X-amd64.iso`
+It also outputs a MANIFEST-CPUTYPE (e.g. MANIFEST-amd64) file with the names of all included binaries (alongside the Debian DVD ISO), their checksums, and their signatures.
 
-Notable configurations by the preseed.cfg file, **not including the setup.sh script**:
+**WARNING!** Booting from this ISO will **automatically and without prompts** wipe the first non-removable disk and set up maximum encrypted LVM — use only on dedicated SC Node hardware!
 
-- **UTC** timezone (location-independent)
-- **hostname**: sc-node
-- **domain**: internal
-- **root** login disabled
-- **user**: satoshi (w/ sudo rights)
-    - **passwd**: satoshi
-    - **name**: Satoshi Nakamoto
-- **curl** utility installed
+Notable configurations by `preseed.cfg` (excluding `setup.sh` actions):
+- Timezone: **UTC** (location-independent)
+- Hostname: `sc-node`
+- Domain: `internal`
+- Root login: **disabled**
+- User: `satoshi` (with sudo)
+  - Password: `satoshi` (**CHANGE IMMEDIATELY** post-install!)
+  - Name: Satoshi Nakamoto
+- Partitioning: LUKS encryption on LVM
+- Packages: `curl`, `tpm2-tools` (for TPM detection/binding in `setup.sh`)
+- Runs late_commands.sh script to ensure `sc-node/setup.sh` runs via firstboot.sh script, on first boot
 
-### Requirements
+**Disk Encryption Notes (Automated via Preseed):**
+- `setup.sh` (run by firstboot.sh) binds the partitioning encryption key to the fTPM 2.0 and enables headless auto-unlock.
+- If TPM missing/not enabled, `setup.sh` halts with error (e.g., "TPM 2.0 not detected — enable fTPM/PTT in BIOS and reinstall").
+
+### Requirements to Build the ISO
 - A linux host system w/ **sudo** privileges
 - ~16 GB free disk space (original ISO ≈ 4.7 GB + extracted contents + temporary files)
 - Good Internet (for downloading ~4.7 GB ISO + tools/repo)
 - Required packages (automatically installed if missing): `git`, `curl`, `gnupg`, `rsync`, `xorriso`
 
+### Publish Release
+- Run the ISO build script for **each supported CPU architecture**  to generate all variants
+    Hey! It makes sense to use the same binary version for each run
+- Verify signatures in the MANIFEST-\* files
+- Rename each ISO to update the target version for release: e.g., `sc-node-X.X.X-amd64.iso` --> `sc-node-1.4.3-amd64.iso`
+- Generate a checksum file for all ISOs and MANIFEST-\* files:
+    sha256sum -- * 2>/dev/null | grep -v '  SHA256SUMS$' > SHA256SUMS # Run in same directory as iso files
+    sha256sum -- MANIFEST* 2>/dev/null | grep -v '  SHA256SUMS$' >> SHA256SUMS
+- Generate the signature file: SHA256SUMS.asc
+    gpg --detach-sign --armor --local-user $LONGKEYID --output SHA256SUMS.asc SHA256SUMS
+- Split the ISO files into 1G chunks (Github Release Assets are limited to 2GB file sizes)
+    for f in *.iso; do split -b 1G -d --additional-suffix=.part "$f" "$f."; done
+- Go to the github.com repository → **Releases** → **Draft a new release**
+- Create a new tag (e.g., `v1.4.3`)
+- Set the release title (e.g., `SC Node v1.4.3`)
+- Add release notes - Include the contents of all the MANIFEST-\* file
+- Attach assets: renamed `.iso` files, checksum file, signature file, and the MANIFEST-\* files
+- Publish the release
+
 ## Create USB Install Stick
 Dedicated USB with 8GB+ is required.
-USB 3.0+ is highly recommended to shorten install times.
+USB 3.0+ is highly recommended to shorten the setup time for each SC Node.
 
-1. Download the latest ISO for your CPU from the GitHub release page: https://github.com/satoshiware/sc_node/releases
+1. Download all the latest ISO files for the desired CPU: https://github.com/satoshiware/sc-node/releases
+2. Combine the ISO files into a single ISO file
+    cat sc-node-X.X.X-CPUTYPE.iso.\*.part > sc-node-X.X.X-CPUTYPE.iso
+3. Verify ISO Checksum and Signature
+4. Depending on your OS (Windows, Linux, or even Linux on Windows [WSL]), search for an online guide to correctly write an ISO to a USB drive so that it will boot and install as desired.
+5. Label the USB stick accordingly
 
-2. Verify Checksum and Signatures
+## SC Node Setup (w/ USB Install Stick)
+To get a new Sovereign Circle Node up and running, follow these steps in order.
 
-3. Depending on your OS (Windows, Linux, or even Linux on Windows [WSL]), search for an online guide to correctly write an ISO to a USB drive so that it will boot and install as desired.
+### Prerequisites
+- Mini-PC to become the next SC Node that meets the [Hardware Specifications](#hardware-specifications)
+- Wired Internet
+- Latest USB Install Stick
+- A USB barcode/QR scanner plugged into the SC Node
+- One unique (pre-generated) **SC Node Key Card** (see [SC Node Key Card](#sc-node-key-card--design--contents) for details)
 
-*Note: Be sure the target machine has wired internet; otherwise, the setup will prompt for networking configuration during install. It’s recommended the install process has internet access to ensure the most up-to-date Debian install files. Also, the setup.sh script run first boot requires it!*
+### Step 1: BIOS/UEFI Preparation (Mandatory)
+Before booting from USB, configure the BIOS/UEFI on the target mini-PC:
+
+1. Enter BIOS/UEFI Setup
+2. Enable **fTPM / PTT** (firmware TPM 2.0)
+3. Enable **Secure Boot**
+4. Set the **supervisor/admin password** to match Satoshi's password printed on the SC Node Key Card
+   - **CRITICAL** Ensure you scanned/entered the correct information from the SC Node Key Card!
+5. Set boot priority:
+   - Primary boot device → internal SSD/NVMe (Everything else is disabled)
+   - Enable one-time boot override to USB
+6. Save changes and exit.
+
+**Important:** If fTPM/PTT is disabled, the setup will fail later — there is no fallback mode.
+
+### Step 2: Boot from USB Install Stick
+1. Insert the USB Install Stick into the SC Node
+2. Power on (or reboot)
+3. The GRUB menu appears → **auto-install** option starts in 5 seconds (or press Enter to begin immediately).
+4. The preseeded Debian installer runs hands-free:
+   - Wipes the first non-removable disk (SSD/NVMe) with no prompts
+   - Partitions: unencrypted EFI + `/boot`, encrypted LVM for root (auto-generated random strong passphrase created during install)
+   - Minimal Debian install + listed packages
+   - Creates user `satoshi` with sudo rights and `satoshi` as a temporary password
+   - Executes `late_commands.sh` to finalize base config, and configure firstbooth.sh and setup.sh to run next boot
+5. Installation completes → system reboots automatically to the internal SSD
+
+### Step 3: First Boot – Pairing & Final Configuration
+After reboot, the system boots into the new Debian install:
+
+1. `firstboot.sh` runs automatically (configurred by the preseeded config)
+   - It launches the setup.sh script and then self-deletes from ever running again automatically
+2. `setup.sh` launches and begins interactive setup:
+   - Prompts you to scan contents from the **SC Node Key Card** using the connected barcode/QR scanner
+   - Prompts for verification to ensure all information was entered correctly
+3. The remaining `setup.sh` script is non-interactive
+   - Binds the auto-generated LUKS key to fTPM 2.0
+   - Regenerates initramfs for TPM auto-unlock on future boots
+   - Installs and configures all core components: Bitcoin, AZCoin, Lightning, Stratum, etc.
+4. Reboot to confirm headless TPM auto-unlock works (disk should unlock silently without passphrase)
+5. Review logs: `/var/log/*.log`
+
+Once finished, your SC Node is fully operational, paired with its unique Key Card, and ready to serve your Sovereign Circle.
+
+## <<<<<<<<<<<<<<<<<<<< Key card stuff here <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+## Server (Hub) Specs – 800 Clients
+Optimized, cost-effective server sufficient for 800 WireGuard clients (SC Nodes) under moderate load.
+
+**Recommended Specs**
+- CPUs: 8–16 cores
+- RAM: 16–32 GB
+- Storage: 256–512 GB SSD/NVMe
+- Network: 1–10 Gbps uplink with 1 public IPv4
+- Outbound transfer: ≥6 TB/month (or high-egress plan)
