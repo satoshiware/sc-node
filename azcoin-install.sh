@@ -24,8 +24,8 @@ RPC_PASSWORD_DIR="/home/azcoin"
 RPC_PASSWORD_FILE="${RPC_PASSWORD_DIR}/rpcpassword"
 
 # Documentation
-README_DIR="/usr/local/share/doc/azcoin"
-README_FILE="${README_DIR}/readme.txt"
+README_DIR="/usr/local/share/doc"
+README_FILE="${README_DIR}/azcoin.txt"
 
 # ===================== CHECKS =====================
 if [[ $EUID -ne 0 ]]; then
@@ -126,7 +126,10 @@ if [[ ! -f /etc/azcoin/azcoin.conf ]]; then
     fi
     log "rpcauth.py generated successfully: $RPCAUTH"
 
+    umask 077 # umask 077 → new files get 0600 (rw-------), dirs 0700 (rwx------)
     echo "${PASSWORD}" > "${RPC_PASSWORD_FILE}"
+    umask 02 # Restore standard umask (files 0644, dirs 0755)
+    PASSWORD="CLEARING MEMORY!!!!!!!!!!!!!!!!!!!!!!!"
     chown azcoin:azcoin "${RPC_PASSWORD_FILE}"
     chmod 600 "${RPC_PASSWORD_FILE}"
     log "RPC password saved to ${RPC_PASSWORD_FILE} (600 perms)"
@@ -157,8 +160,12 @@ rpcbind=127.0.0.1
 # Restrict RPC callers to localhost
 rpcallowip=127.0.0.1
 
+# IP address your node will advertise to the network so other nodes can connect inbound.
+# Use your VPN exit IP, VPS public IP, or home public IP here. Update as needed.
+externalip=192.0.2.1
+
 # P2P listening port for incoming connections from other nodes/peers (Default is 19333)
-port=19333
+port=12345
 
 # Force persistent outbound connection to specific trusted peer(s)
 addnode=azcoin-seed.satoshiware.org
@@ -330,8 +337,6 @@ fi
 # ===================== README =====================
 log "Creating system-wide documentation README..."
 mkdir -p "${README_DIR}"
-chown root:root "${README_DIR}"
-chmod 755 "${README_DIR}"
 
 cat > "${README_FILE}" << EOF
 # SC Node - AZCoin Core (Bare Metal)
@@ -343,20 +348,28 @@ cat > "${README_FILE}" << EOF
     azcoin-cli (755 root:root)
     rpcauth.py (755 root:root)
     azcoin_wallet_event_append.sh (755 root:root)
+
 - blockchain data directory: /var/lib/azcoin (710 azcoin:azcoin)
     .cookie (600 azcoin:azcoin)
     debug.log (640 azcoin:azcoin)
     wallet directory: /var/lib/azcoin/wallet (700 azcoin:azcoin)
         wallet.dat (600 azcoin:azcoin)
+
 - configuration directory: /etc/azcoin (755 azcoin:azcoin)
     azcoin.conf: /etc/azcoin/azcoin.conf (644 azcoin:azcoin)
+
 - log rotate configuration: /etc/logrotate.d/azcoin (644 root:root)
+
 - log directory location: /var/log/azcoin (755 root:root)
     symlink to /var/lib/azcoin/debug.log (640 azcoin:azcoin)
     wallet_events.log (640 azcoin:azcoin)
+
 - rpcpassword: ${RPC_PASSWORD_FILE} (600 azcoin:azcoin)
     rpcpassword directory: ${RPC_PASSWORD_DIR} (700 azcoin:azcoin)
+
 - azcoin-install setup log file: ${LOG_FILE} (644 root:root)
+
+- systemd service file: /etc/systemd/system/azcoind.service (644 root:root)
 
 ## Management
 - Start/Stop: sudo systemctl start/stop azcoind
@@ -376,8 +389,6 @@ cat > "${README_FILE}" << EOF
 - ZMQ New Block Hash (zmqpubhashblock): 127.0.0.1:29334
 - Username: satoshi Password: sudo cat ${RPC_PASSWORD_FILE}
 EOF
-chown root:root "${README_FILE}"
-chmod 644 "${README_FILE}"
 
 log "Setup complete!"
 log "azcoin-install setup log file: ${LOG_FILE}"
