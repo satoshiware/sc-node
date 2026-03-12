@@ -110,6 +110,16 @@ export default function Header({ setView, user, onSignOut }) {
           <button
             type="button"
             onClick={() => {
+              console.log('[Header] Going to miner');
+              setView('miner');
+            }}
+            className="text-sm text-gray-400 hover:text-white transition-colors cursor-pointer"
+          >
+            Miner
+          </button>
+          <button
+            type="button"
+            onClick={() => {
               console.log('[Header] Going to exchange');
               setView('exchange');
             }}

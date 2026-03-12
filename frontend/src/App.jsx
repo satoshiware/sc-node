@@ -9,6 +9,7 @@ import OrdersTable from './components/OrdersTable'
 import OrderManagement from './components/OrderManagement'
 import Wallet from './components/Wallet'
 import Exchange from './components/Exchange'
+import Miner from './components/Miner'
 import Login from './components/Login'
 
 export default function App(){
@@ -44,6 +45,8 @@ export default function App(){
         <Wallet setView={setView} user={user} onSignOut={handleSignOut} balances={balances} />
       ) : view === 'exchange' ? (
         <Exchange setView={setView} />
+      ) : view === 'miner' ? (
+        <Miner setView={setView} />
       ) : (
         <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-12 lg:gap-4 xl:gap-4">
           <div className="flex flex-col gap-4 md:col-span-8 xl:col-span-8">
