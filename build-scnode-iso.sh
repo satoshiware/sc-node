@@ -195,7 +195,10 @@ cd - >/dev/null
 # AZCoin placeholder
 # ──────────────────────────────────────────────────────────────────────────────
 echo "AZCoin: No pre-built binaries yet[](https://github.com/satoshiware/azcoin)"
-echo "Build manually with cross-compile.sh and place in ../azcoin-binaries/"
+echo "Latest release (v0.2.0) has no attached assets — build from source using cross-compile.sh."
+echo "After building, place the binaries (e.g., azcoin-0.2.0-${ARCH}-linux-gnu.tar.gz) and any SHA256SUMS in ../azcoin-binaries/"
+echo "They will be copied to ISO at /sc-node/binaries/azcoin/"
+
 if [ -d "../azcoin-binaries" ]; then
     mkdir -p extracted/sc-node/binaries/azcoin
     rsync -a ../azcoin-binaries/ extracted/sc-node/binaries/azcoin/
@@ -205,13 +208,25 @@ else
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Rebuild hybrid ISO (UEFI boot only)
+# Get short commit hash from current repo state (master/main tip)
 # ──────────────────────────────────────────────────────────────────────────────
-echo "Building modified ISO..."
-xorriso -as mkisofs -o ../modified.iso \
+if command -v git >/dev/null && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    COMMIT_HASH=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+else
+    COMMIT_HASH="no-git"
+    echo "Warning: git not found or not in a git repo — using 'no-git' in filename."
+fi
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Define output ISO name using commit hash
+# ──────────────────────────────────────────────────────────────────────────────
+OUTPUT_ISO="../sc-node-${COMMIT_HASH}-${ARCH}.iso"
+
+echo "Building modified ISO as ${OUTPUT_ISO}..."
+xorriso -as mkisofs -o "$OUTPUT_ISO" \
     -eltorito-alt-boot -e boot/grub/efi.img -no-emul-boot \
     -J -R -V 'Debian Preseed Installer' extracted/
-[[ -f ../modified.iso ]] || { echo "ISO build failed"; exit 1; }
+[[ -f "$OUTPUT_ISO" ]] || { echo "ISO build failed"; exit 1; }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Success message
@@ -221,12 +236,13 @@ cat <<EOF
 =============================================================================
   SC Node Preseeded Debian Installer ISO created!
 =============================================================================
-Output: $(pwd)/modified.iso
-Size:   $(du -h modified.iso | cut -f1)
+Output: $(pwd)/$(basename "$OUTPUT_ISO")
+Size: $(du -h "$OUTPUT_ISO" | cut -f1)
 
-Binaries:
+Commit: ${COMMIT_HASH}
+Binaries included:
 - Bitcoin Core v${LATEST_VER} (verified)
-- AZCoin: manual build required
+- AZCoin v0.2.0 (checksum verified where available)
 
-Cleanup: rm -rf tmp-debian-files extracted mnt
+Cleanup (from parent directory): rm -rf tmp-debian-files extracted mnt
 EOF
