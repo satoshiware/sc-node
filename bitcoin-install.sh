@@ -24,8 +24,8 @@ RPC_PASSWORD_DIR="/home/bitcoin"
 RPC_PASSWORD_FILE="${RPC_PASSWORD_DIR}/rpcpassword"
 
 # Documentation
-README_DIR="/usr/local/share/doc/bitcoin"
-README_FILE="${README_DIR}/readme.txt"
+README_DIR="/usr/local/share/doc"
+README_FILE="${README_DIR}/bitcoin.txt"
 
 # ===================== CHECKS =====================
 if [[ $EUID -ne 0 ]]; then
@@ -126,7 +126,10 @@ if [[ ! -f /etc/bitcoin/bitcoin.conf ]]; then
     fi
     log "rpcauth.py generated successfully: $RPCAUTH"
 
+    umask 077 # umask 077 → new files get 0600 (rw-------), dirs 0700 (rwx------)
     echo "${PASSWORD}" > "${RPC_PASSWORD_FILE}"
+    umask 02 # Restore standard umask (files 0644, dirs 0755)
+    PASSWORD="CLEARING MEMORY!!!!!!!!!!!!!!!!!!!!!!!"
     chown bitcoin:bitcoin "${RPC_PASSWORD_FILE}"
     chmod 600 "${RPC_PASSWORD_FILE}"
     log "RPC password saved to ${RPC_PASSWORD_FILE} (600 perms)"
@@ -332,8 +335,6 @@ fi
 # ===================== README =====================
 log "Creating system-wide documentation README..."
 mkdir -p "${README_DIR}"
-chown root:root "${README_DIR}"
-chmod 755 "${README_DIR}"
 
 cat > "${README_FILE}" << EOF
 # SC Node - Bitcoin Core (Bare Metal)
@@ -345,20 +346,28 @@ cat > "${README_FILE}" << EOF
     bitcoin-cli (755 root:root)
     rpcauth.py (755 root:root)
     bitcoin_wallet_event_append.sh (755 root:root)
+
 - blockchain data directory: /var/lib/bitcoin (710 bitcoin:bitcoin)
     .cookie (600 bitcoin:bitcoin)
     debug.log (640 bitcoin:bitcoin)
     wallet directory: /var/lib/bitcoin/wallet (700 bitcoin:bitcoin)
         wallet.dat (600 bitcoin:bitcoin)
+
 - configuration directory: /etc/bitcoin (755 bitcoin:bitcoin)
     bitcoin.conf: /etc/bitcoin/bitcoin.conf (644 bitcoin:bitcoin)
+
 - log rotate configuration: /etc/logrotate.d/bitcoin (644 root:root)
+
 - log directory location: /var/log/bitcoin (755 root:root)
     symlink to /var/lib/bitcoin/debug.log (640 bitcoin:bitcoin)
     wallet_events.log (640 bitcoin:bitcoin)
+
 - rpcpassword: ${RPC_PASSWORD_FILE} (600 bitcoin:bitcoin)
     rpcpassword directory: ${RPC_PASSWORD_DIR} (700 bitcoin:bitcoin)
+
 - bitcoin-install setup log file: ${LOG_FILE} (644 root:root)
+
+- systemd service file: /etc/systemd/system/bitcoind.service (644 root:root)
 
 ## Management
 - Start/Stop: sudo systemctl start/stop bitcoind
@@ -377,8 +386,6 @@ cat > "${README_FILE}" << EOF
 - ZMQ New Block Hash (zmqpubhashblock): 127.0.0.1:28332
 - Username: satoshi   Password: sudo cat ${RPC_PASSWORD_FILE}
 EOF
-chown root:root "${README_FILE}"
-chmod 644 "${README_FILE}"
 
 log "Setup complete!"
 log "bitcoin-install setup log file: ${LOG_FILE}"
