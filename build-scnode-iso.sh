@@ -35,7 +35,7 @@ set -euo pipefail
 # Enforce running as root
 # ──────────────────────────────────────────────────────────────────────────────
 if [ "$EUID" -ne 0 ]; then
-    echo "This script must be run as root (sudo ./sc-node/build-scnode-iso.sh)"
+    echo "This script must be run as root"
     exit 1
 fi
 
@@ -44,7 +44,7 @@ fi
 # ──────────────────────────────────────────────────────────────────────────────
 REPO_DIR="./sc-node"
 if [[ ! -d "$REPO_DIR" || ! -f "$REPO_DIR/preseed.cfg" || ! -f "$REPO_DIR/setup.sh" ]]; then
-    echo "Error: This script must be run from the parent directory of the sc-node repo."
+    echo "Error: This script must be run from the parent directory of the sc-node repo: sudo ./sc-node/build-scnode-iso.sh"
     echo "Expected structure:"
     echo "  ./sc-node/build-scnode-iso.sh"
     echo "  ./sc-node/preseed.cfg"
@@ -116,12 +116,10 @@ ISO_NAME=$(curl -s "$DIR_URL" | grep -oP "debian-\K[0-9.]+\-${ARCH}-DVD-1\.iso" 
 ISO_NAME="debian-${ISO_NAME}"
 ISO_URL="${DIR_URL}${ISO_NAME}"
 HASH_URL="${DIR_URL}SHA256SUMS"
-SIG_URL="${HASH_URL}.sign"
 
 echo ""; echo "Download locations:"
 echo " ISO:   $ISO_URL"
-echo " SHA:   $HASH_URL"
-echo " SIG:   $SIG_URL"; echo ""
+echo " SHA:   $HASH_URL"; echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Download Debian ISO, checksum, and signature file
@@ -143,7 +141,7 @@ DEBIAN_ISO_SHA256=$(grep -F "${ISO_NAME}" SHA256SUMS | awk '{print $1}')
 # Create (or empty/truncate) the manifest file in the parent directory
 : > "$MANIFEST_FILE"
 
-cat >> "$MANIFEST_FILE" << 'EOF'
+cat >> "$MANIFEST_FILE" << EOF
 SC Node ISO Manifest - Verified Hashes of Critical Files
 
 Debian DVD-1 ISO (for ${ARCH})
@@ -206,17 +204,16 @@ debconf-set-selections -c "../${REPO_DIR}/preseed.cfg" || { echo "Preseed syntax
 echo "Preseed OK"
 
 # ──────────────────────────────────────────────────────────────────────────────
-# BTC Download: tar.gz, (verified) checksum, and signature files w/ interactive version-selection prompt.
-# Add to the MANIFEST file the information to verify the signature
+# Bitcoin download + checksum verification
 # ──────────────────────────────────────────────────────────────────────────────
-echo "Fetching available Bitcoin Core versions from bitcoincore.org..."
+echo ""; echo "Fetching available Bitcoin Core versions from bitcoincore.org..."
 
 BITCOIN_URL="https://bitcoincore.org/bin"
 
 # Fetch versions, sort descending (newest first), limit to top 8 for menu readability
 BTC_VERSIONS=($(curl -s --fail "$BITCOIN_URL/" \
     | grep -oP 'bitcoin-core-\K[0-9.]+(?=/)' \
-    | sort -V -r \
+    | sort -Vru \
     | head -n 8))
 
 if [[ ${#BTC_VERSIONS[@]} -eq 0 ]]; then
@@ -256,79 +253,107 @@ echo "Using Bitcoin Core: v${BTC_SELECTED_VER} (${ALT_ARCH})"
 
 # Proceed with download using $BTC_SELECTED_VER
 BITCOIN_URL_DIR="${BITCOIN_URL}/bitcoin-core-${BTC_SELECTED_VER}"
-TAR_NAME="bitcoin-${BTC_SELECTED_VER}-${ALT_ARCH}-linux-gnu.tar.gz"
-SHA256_URL="${BITCOIN_URL_DIR}/SHA256SUMS"
-SIG_URL="${BITCOIN_URL_DIR}/SHA256SUMS.asc"
+BITCOIN_TAR_NAME="bitcoin-${BTC_SELECTED_VER}-${ALT_ARCH}-linux-gnu.tar.gz"
+BITCOIN_SHA256_URL="${BITCOIN_URL_DIR}/SHA256SUMS"
 
 # Download the tarball into the ISO extraction path
-curl --fail -L -o "extracted/sc-node/${TAR_NAME}" "${BITCOIN_URL_DIR}/${TAR_NAME}" || { echo "Download failed: ${TAR_NAME} (missing for this version/arch?)" >&2; exit 1; }
+curl --fail -L -o "extracted/sc-node/${BITCOIN_TAR_NAME}" "${BITCOIN_URL_DIR}/${BITCOIN_TAR_NAME}" || { echo "Download failed: ${BITCOIN_TAR_NAME} (missing for this version/arch?)" >&2; exit 1; }
 
 # Download checksums/signature to current dir ($TEMP_DIR)
-curl --fail -L -O "$SHA256_URL" || { echo "Download failed: SHA256SUMS" >&2; exit 1; }
+curl --fail -L -O "$BITCOIN_SHA256_URL" || { echo "Download failed: SHA256SUMS" >&2; exit 1; }
 
 # Verify checksum
-ln -sf "extracted/sc-node/${TAR_NAME}" "./${TAR_NAME}" || { echo "Symlink for verification failed" >&2; exit 1; } # Symlink the tarball into current dir ($TEMP_DIR) so sha256sum -c can find it easily
-if ! grep -F "${TAR_NAME}" SHA256SUMS | sha256sum -c -; then # Verify (now the symlink makes the file appear local)
-    echo "Bitcoin Core checksum failed for ${TAR_NAME}" >&2
-    rm -f "./${TAR_NAME}"
+ln -sf "extracted/sc-node/${BITCOIN_TAR_NAME}" "./${BITCOIN_TAR_NAME}" || { echo "Symlink for verification failed" >&2; exit 1; } # Symlink the tarball into current dir ($TEMP_DIR) so sha256sum -c can find it easily
+if ! grep -F "${BITCOIN_TAR_NAME}" SHA256SUMS | sha256sum -c -; then # Verify (now the symlink makes the file appear local)
+    echo "Bitcoin Core checksum failed for ${BITCOIN_TAR_NAME}" >&2
+    rm -f "./${BITCOIN_TAR_NAME}"
     exit 1
 fi
-rm -f "./${TAR_NAME}"  # remove symlink (file itself is untouched)
+rm -f "./${BITCOIN_TAR_NAME}"  # remove symlink (file itself is untouched)
 echo "Bitcoin Core v${BTC_SELECTED_VER} checksum verified."
 
 # Append Bitcoin Core info to manifest
-BTC_TAR_SHA256=$(grep -F "${TAR_NAME}" SHA256SUMS | awk '{print $1}')
+BTC_TAR_SHA256=$(grep -F "${BITCOIN_TAR_NAME}" SHA256SUMS | awk '{print $1}')
 
 cat >> "$MANIFEST_FILE" << EOF
 Bitcoin Core (for ${ALT_ARCH})
-File:               ${TAR_NAME}
+File:               ${BITCOIN_TAR_NAME}
 SHA256 Checksum:    ${BTC_TAR_SHA256}
 EOF
 echo "" >> "$MANIFEST_FILE"
 echo "Bitcoin Core details added to the ${MANIFEST_FILE} file"
 
 # ──────────────────────────────────────────────────────────────────────────────
-# AZCoin v0.2.0 binaries (from release assets)
+# AZCoin download + checksum verification
 # ──────────────────────────────────────────────────────────────────────────────
-echo "Downloading and verifying AZCoin v0.2.0 binaries from release assets..."
+echo ""; echo "Fetching available AZCoin release versions from GitHub..."
 
-AZC_RELEASE_URL="https://github.com/satoshiware/azcoin/releases/download/v0.2.0"
-AZC_SHA256SUMS="SHA256SUMS"
+AZCOIN_REPO_URL="https://github.com/satoshiware/azcoin/releases"
+AZCOIN_VERSIONS=($(curl -s --fail "$AZCOIN_REPO_URL" \
+    | grep -oP 'v\K[0-9.]+(?=</a>)' \
+    | sort -Vru \
+    | head -n 8))
 
-# Map ARCH to AZCoin binary filename
-case "$ARCH" in
-    amd64) AZC_BIN_NAME="azcoin-0.2.0-x86_64-linux-gnu.tar.gz" ;;
-    arm64) AZC_BIN_NAME="azcoin-0.2.0-aarch64-linux-gnu.tar.gz" ;;
-    *)     echo "Warning: No AZCoin binary for $ARCH — skipping."; AZC_BIN_NAME=""; ;;
-esac
-
-mkdir -p binaries/azcoin
-cd binaries/azcoin
-
-# Download SHA256SUMS
-curl -LO "${AZC_RELEASE_URL}/${AZC_SHA256SUMS}"
-
-if [ -n "$AZC_BIN_NAME" ]; then
-    curl -LO "${AZC_RELEASE_URL}/${AZC_BIN_NAME}"
-
-    # Verify checksum if entry exists
-    if grep -q "$AZC_BIN_NAME" "$AZC_SHA256SUMS"; then
-        grep "$AZC_BIN_NAME" "$AZC_SHA256SUMS" | sha256sum -c - || { echo "AZCoin checksum failed for $AZC_BIN_NAME"; exit 1; }
-        echo "AZCoin $AZC_BIN_NAME checksum verified."
-    else
-        echo "Warning: No hash entry for $AZC_BIN_NAME in SHA256SUMS — skipping checksum."
-    fi
-
-    # Extract and copy to ISO path
-    tar -xzf "$AZC_BIN_NAME"
-    mkdir -p ../../extracted/sc-node/binaries/azcoin
-    cp -r ./* ../../extracted/sc-node/binaries/azcoin/
-    echo "AZCoin v0.2.0 binaries copied to ISO."
-else
-    echo "No matching AZCoin binary for $ARCH."
+if [[ ${#AZCOIN_VERSIONS[@]} -eq 0 ]]; then
+    echo "Error: Could not fetch AZCoin versions from GitHub." >&2
+    exit 1
 fi
 
-cd - >/dev/null
+echo ""
+echo "Available recent versions (newest first):"
+PS3="Enter a number (1-${#AZCOIN_VERSIONS[@]}) or type a version directly (e.g., 0.2.0): "
+select AZCOIN_SELECTED_VER in "${AZCOIN_VERSIONS[@]}"; do
+    if [[ -n "$AZCOIN_SELECTED_VER" ]]; then
+        break
+    elif [[ -n "$REPLY" ]]; then
+        AZCOIN_SELECTED_VER="$REPLY"
+        if ! [[ "$AZCOIN_SELECTED_VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid format. Use something like 0.2.0, 0.1.5, etc." >&2
+            continue
+        fi
+        CUSTOM_URL="${AZCOIN_REPO_URL}/download/v${AZCOIN_SELECTED_VER}/"
+        if ! curl -s --head --fail "$CUSTOM_URL" >/dev/null; then
+            echo "Version v${AZCOIN_SELECTED_VER} not found at ${CUSTOM_URL}" >&2
+            continue
+        fi
+        break
+    else
+        echo "Please enter a number or version string."
+    fi
+done
+
+echo "Using AZCoin: v${AZCOIN_SELECTED_VER} (${ALT_ARCH})"
+
+AZCOIN_URL_DIR="${AZCOIN_REPO_URL}/download/v${AZCOIN_SELECTED_VER}"
+AZCOIN_TAR_NAME="azcoin-${AZCOIN_SELECTED_VER}-${ALT_ARCH}-linux-gnu.tar.gz"
+AZCOIN_SHA256_URL="${AZCOIN_URL_DIR}/SHA256SUMS"
+
+# Download the tarball into the ISO extraction path
+curl --fail -L -o "extracted/sc-node/${AZCOIN_TAR_NAME}" "${AZCOIN_URL_DIR}/${AZCOIN_TAR_NAME}" || { echo "Download failed: ${AZCOIN_TAR_NAME} (missing for this version/arch?)" >&2; exit 1; }
+
+# Download checksum file to current dir ($TEMP_DIR)
+curl --fail -L -O "$AZCOIN_SHA256_URL" || { echo "Download failed: SHA256SUMS" >&2; exit 1; }
+
+# Verify checksum
+ln -sf "extracted/sc-node/${AZCOIN_TAR_NAME}" "./${AZCOIN_TAR_NAME}" || { echo "Symlink for verification failed" >&2; exit 1; } # Symlink the tarball into current dir ($TEMP_DIR) so sha256sum -c can find it easily
+if ! grep -F "${AZCOIN_TAR_NAME}" SHA256SUMS | sha256sum -c -; then # Verify (now the symlink makes the file appear local)
+    echo "AZCoin checksum failed for ${AZCOIN_TAR_NAME}" >&2
+    rm -f "./${AZCOIN_TAR_NAME}"
+    exit 1
+fi
+rm -f "./${AZCOIN_TAR_NAME}" # remove symlink (file itself is untouched)
+echo "AZCoin v${AZCOIN_SELECTED_VER} checksum verified."
+
+# Append AZCoin Core info to manifest
+AZCOIN_TAR_SHA256=$(grep -F "${AZCOIN_TAR_NAME}" SHA256SUMS | awk '{print $1}')
+
+cat >> "$MANIFEST_FILE" << EOF
+AZCoin Core (for ${ALT_ARCH})
+File:               ${AZCOIN_TAR_NAME}
+SHA256 Checksum:    ${AZCOIN_TAR_SHA256}
+EOF
+echo "" >> "$MANIFEST_FILE"
+echo "AZCoin Core details added to the ${MANIFEST_FILE} file"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Rebuild hybrid ISO (UEFI boot only)
@@ -340,7 +365,7 @@ echo "Building hybrid ISO: ${ISO_FILENAME} ..."
 
 xorriso -as mkisofs -o "../${ISO_FILENAME}" \
     -eltorito-alt-boot -e boot/grub/efi.img -no-emul-boot \
-    -J -R -V 'SC Node Installer' extracted/
+    -J -R -V 'SCNODE' extracted/
 
 [[ -f "../${ISO_FILENAME}" ]] || { echo "ISO build failed" >&2; exit 1; }
 
@@ -349,7 +374,7 @@ echo "ISO built successfully: ../${ISO_FILENAME}"
 # ──────────────────────────────────────────────────────────────────────────────
 # Success message + display manifest contents via cat
 # ──────────────────────────────────────────────────────────────────────────────
-cd ..
+echo ""; cd ..
 cat <<EOF
 SC Node Installer ISO Created Successfully!
 
