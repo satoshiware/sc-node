@@ -8,20 +8,21 @@ import ManageFunds from './ManageFunds'
 export default function OrderManagement({ setView, user, onSignOut }){
   return (
     <div className="min-h-screen p-2 sm:p-4">
-      <div className="sticky top-0 z-30 bg-gray-900/60 backdrop-blur-sm px-3 py-2 rounded-b-md mb-4 flex items-center justify-between">
-        <button
-          type="button"
-          onClick={() => setView && setView('home')}
-          className="text-sm text-gray-200 hover:text-white flex items-center gap-2"
-        >
-          <FiChevronLeft className="w-4 h-4" />
-          Back
-        </button>
+      <div className="max-w-6xl mx-auto">
+        <div className="sticky top-0 z-30 bg-gray-900/60 backdrop-blur-sm px-3 py-2 rounded-b-md mb-4 flex items-center justify-between">
+          <button
+            type="button"
+            onClick={() => setView && setView('home')}
+            className="text-sm text-gray-200 hover:text-white flex items-center gap-2"
+          >
+            <FiChevronLeft className="w-4 h-4" />
+            Back
+          </button>
 
-        <div />
-      </div>
+          <div />
+        </div>
 
-      <div className="space-y-4">
+        <div className="space-y-4">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <h2 className="text-lg font-semibold text-gray-100">Order management</h2>
@@ -62,6 +63,7 @@ export default function OrderManagement({ setView, user, onSignOut }){
           <div className="mt-4 min-w-0">
             <OrdersTable />
           </div>
+        </div>
         </div>
       </div>
     </div>
