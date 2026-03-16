@@ -27,18 +27,19 @@ export default function Wallet({ setView, user, onSignOut, balances }){
 
   return (
     <div className="min-h-screen p-2 sm:p-4">
-      <div className="sticky top-0 z-30 bg-gray-900/60 backdrop-blur-sm px-3 py-2 rounded-b-md mb-4 flex items-center">
-        <button
-          type="button"
-          onClick={() => setView && setView('home')}
-          className="text-sm text-gray-200 hover:text-white flex items-center gap-2"
-        >
-          <FiChevronLeft className="w-4 h-4" />
-          Back
-        </button>
-      </div>
+      <div className="max-w-6xl mx-auto">
+        <div className="sticky top-0 z-30 bg-gray-900/60 backdrop-blur-sm px-3 py-2 rounded-b-md mb-4 flex items-center">
+          <button
+            type="button"
+            onClick={() => setView && setView('home')}
+            className="text-sm text-gray-200 hover:text-white flex items-center gap-2"
+          >
+            <FiChevronLeft className="w-4 h-4" />
+            Back
+          </button>
+        </div>
 
-      <div className="space-y-4">
+        <div className="space-y-4">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h2 className="text-lg font-semibold text-gray-100">Portfolio</h2>
@@ -63,7 +64,7 @@ export default function Wallet({ setView, user, onSignOut, balances }){
               <div>Total</div>
               <div className="hidden md:block">Limits</div>
               <div>Available</div>
-              <div className="col-span-2 md:col-span-1 text-right">Actions</div>
+              <div className="col-span-2 md:col-span-1 text-left">Actions</div>
               <div className="hidden md:block" />
             </div>
 
@@ -110,6 +111,7 @@ export default function Wallet({ setView, user, onSignOut, balances }){
               </div>
             </div>
           )}
+        </div>
         </div>
       </div>
     </div>
