@@ -1,0 +1,8 @@
+Case 1 (Both Market) ⚠️ Minor Design Note
+Only one of the two market orders gets matched per cycle. The other stays open and is picked up next cycle (0.3s later). This is intentional non-IOC behavior — not a bug, just worth knowing.
+
+One Real Issue ⚠️
+check_balance at order time doesn't reserve the balance. If user A places a limit sell for 100 AZC and then somehow places another order consuming that AZC before the first one fills, settle_trade will execute azc -= qty and the wallet balance goes negative. The plan documents this as "acceptable for now", but it means:
+
+If you want a quick safety net without full balance reservation, you can add MAX(azc - ?, 0) — but the plan says to leave this for later. Just be aware balances can go negative during testing if a user places conflicting orders.
+

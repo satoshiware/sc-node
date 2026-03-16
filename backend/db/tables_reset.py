@@ -1,19 +1,15 @@
 import sqlite3
 
-try:
-    # Connect to exchange.db (same folder)
-    conn = sqlite3.connect("exchange.db")
-    cursor = conn.cursor()
+conn = sqlite3.connect("exchange.db")
+cursor = conn.cursor()
 
-    # Delete all data from both tables
-    cursor.execute("DELETE FROM orders;")
-    cursor.execute("DELETE FROM trades;")
+cursor.execute("PRAGMA foreign_keys = OFF")
+cursor.execute("DELETE FROM trades")
+cursor.execute("DELETE FROM orders")
+cursor.execute("DELETE FROM wallets")
+cursor.execute("DELETE FROM users")
+cursor.execute("PRAGMA foreign_keys = ON")
 
-    conn.commit()
-    print("All data deleted from orders and trades tables successfully!")
-
-except Exception as e:
-    print("Error:", e)
-
-finally:
-    conn.close()
+conn.commit()
+conn.close()
+print("All tables cleared.")

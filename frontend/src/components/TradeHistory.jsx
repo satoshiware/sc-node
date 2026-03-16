@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
+const WS_URL = import.meta.env.VITE_WS_URL
 
 export default function TradeHistory(){
   const [trades, setTrades] = useState([])
@@ -15,7 +16,7 @@ export default function TradeHistory(){
 
   const connectWebSocket = () => {
     try {
-      const websocket = new WebSocket('ws://localhost:8000/ws/trades')
+      const websocket = new WebSocket(`${WS_URL}/ws/trades`)
       wsRef.current = websocket
 
       websocket.onopen = () => {

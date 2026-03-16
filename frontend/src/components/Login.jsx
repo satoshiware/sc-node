@@ -58,14 +58,13 @@ export default function Login({ onLogin }) {
     authFn(...args)
       .then((userData) => onLogin(userData))
       .catch((err) => {
-        const msg = err.message || ''
-        // Fallback only for connectivity issues (API down, CORS, 404); show error for auth failures (401)
-        const isAuthError = msg.includes('Invalid') || msg.includes('already registered') || msg.includes('401')
-        if (isAuthError) {
-          setError(msg)
-        } else {
+        // Only use mock fallback when backend is completely unreachable (TypeError = fetch failed / CORS / no network)
+        // Any actual HTTP response from the backend (401, 409, 500) = show the error, never mock-login
+        if (err instanceof TypeError) {
           const displayName = mode === 'signup' ? name.trim() : (trimmedEmail.split('@')[0] || 'User')
           onLogin({ id: Date.now(), name: displayName, email: trimmedEmail })
+        } else {
+          setError(err.message || 'Something went wrong')
         }
       })
       .finally(() => setLoading(false))

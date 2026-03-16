@@ -1,5 +1,8 @@
 import React, { useState, useEffect } from 'react'
 
+const WS_URL = import.meta.env.VITE_WS_URL
+const API_URL = import.meta.env.VITE_API_URL
+
 export default function OrdersTable(){
   const [orders, setOrders] = useState([])
   const [loading, setLoading] = useState(true)
@@ -21,7 +24,7 @@ export default function OrdersTable(){
 
   const connectWebSocket = () => {
     try {
-      const websocket = new WebSocket('ws://localhost:8000/ws/orders')
+      const websocket = new WebSocket(`${WS_URL}/ws/orders`)
       
       websocket.onopen = () => {
         console.log('WebSocket connected')
@@ -63,7 +66,7 @@ export default function OrdersTable(){
   const startPolling = () => {
     // Fallback: poll every 2 seconds
     const interval = setInterval(() => {
-      fetch('http://localhost:8000/api/orders/poll')
+      fetch(`${API_URL}/api/orders/poll`)
         .then(res => res.json())
         .then(data => {
           setOrders(data.orders || [])

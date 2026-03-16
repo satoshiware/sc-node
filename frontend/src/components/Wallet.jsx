@@ -5,8 +5,8 @@ import Deposit from './Deposite'
 import ManageFunds from './ManageFunds'
 
 export default function Wallet({ setView, user, onSignOut, balances }){
-  const azc  = balances?.azc  ?? 133.66
-  const sats = balances?.sats ?? 50000
+  const azc  = balances?.azc  ?? 0
+  const sats = balances?.sats ?? 0
 
   const assets = [
     { id: 'BTC', name: 'BTC-SATS', total: '0.01234567', limits: '—', available: '0.01000000', history: [
@@ -54,7 +54,7 @@ export default function Wallet({ setView, user, onSignOut, balances }){
         <div className="bg-gray-800 p-3 sm:p-4 rounded-md min-w-0">
           <div className="mb-4">
             <div className="text-sm text-gray-400">Bitcoin (Satoshis)</div>
-            <div className="text-xl sm:text-2xl font-semibold text-gray-100">8,485,976 sats</div>
+            <div className="text-xl sm:text-2xl font-semibold text-gray-100">{sats.toLocaleString()} sats</div>
           </div>
 
           <div className="overflow-x-auto -mx-1 px-1">

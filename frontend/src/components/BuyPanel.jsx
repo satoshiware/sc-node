@@ -2,7 +2,7 @@ import React, { useState } from 'react'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
-export default function BuyPanel({ balances }) {
+export default function BuyPanel({ balances, user, onWalletRefresh }) {
   const [tab, setTab]             = useState('buy')
   const [orderType, setOrderType] = useState('market')
   const [amount, setAmount]       = useState('')
@@ -10,8 +10,8 @@ export default function BuyPanel({ balances }) {
   const [status, setStatus]       = useState(null) // null | 'loading' | 'success' | 'error'
   const [errorMsg, setErrorMsg]   = useState('')
 
-  const availAzc  = balances?.azc  ?? 133.66
-  const availSats = balances?.sats ?? 1234560
+  const availAzc  = balances?.azc  ?? 0
+  const availSats = balances?.sats ?? 0
 
   function switchTab(t) {
     setTab(t)
@@ -56,11 +56,14 @@ export default function BuyPanel({ balances }) {
       quantity: amtNum,
     }
 
-    try {
-      const res  = await fetch(`${API_URL}/api/orders`, {
+        try {
+      const res = await fetch(`${API_URL}/api/orders`, {
         method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify(body),
+        headers: {
+          'Content-Type': 'application/json',
+          ...(user?.token ? { 'Authorization': `Bearer ${user.token}` } : {}),
+        },
+        body: JSON.stringify(body),
       })
       const data = await res.json()
 
@@ -71,6 +74,7 @@ export default function BuyPanel({ balances }) {
         setStatus('success')
         setAmount('')
         setLimitPrice('')
+        onWalletRefresh?.()                    // ← trigger wallet re-fetch in App.jsx
         setTimeout(() => setStatus(null), 3000)
       }
     } catch {

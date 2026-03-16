@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Path, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
 import asyncio
@@ -7,6 +7,12 @@ from trades import get_all_trades
 from candles import get_historical_candles
 from market_stats import get_market_stats
 from pydantic import BaseModel
+from dotenv import load_dotenv
+from pathlib import Path
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
+from fastapi import Request
+from auth import hash_password, verify_password, create_jwt, get_current_user, get_user_by_email, create_user
+from wallets import get_wallet, create_wallet, check_balance
 
 app = FastAPI()
 
@@ -152,6 +158,15 @@ class PlaceOrderRequest(BaseModel):
     type: str
     price: float | None = None
     quantity: float
+
+class RegisterRequest(BaseModel):
+    email: str
+    name: str
+    password: str
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
 
 class OrderResponse(BaseModel):
     id: int
@@ -329,6 +344,56 @@ async def websocket_market_stats(websocket: WebSocket):
         stats_manager.disconnect(websocket)
         print(f"[Stats WS] Error: {e}")
 
+# ─── Auth Endpoints ───────────────────────────────────────────────────────────
+
+@app.post("/api/auth/register")
+def register(body: RegisterRequest):
+    if not body.email or not body.name or not body.password:
+        raise HTTPException(status_code=400, detail="email, name, and password are required")
+    existing = get_user_by_email(body.email)
+    if existing:
+        raise HTTPException(status_code=409, detail="Email already registered")
+    pw_hash = hash_password(body.password)
+    try:
+        user_id = create_user(body.email, body.name, pw_hash)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    create_wallet(user_id)
+    token = create_jwt(user_id, body.email.lower().strip(), body.name.strip())
+    return {
+        "token": token,
+        "user": {"id": user_id, "email": body.email.lower().strip(), "name": body.name.strip()}
+    }
+
+
+@app.post("/api/auth/login")
+def login(body: LoginRequest):
+    user = get_user_by_email(body.email)
+    if not user or not verify_password(body.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    token = create_jwt(user["id"], user["email"], user["name"])
+    return {
+        "token": token,
+        "user": {"id": user["id"], "email": user["email"], "name": user["name"]}
+    }
+
+
+@app.get("/api/auth/me")
+def me(request: Request):
+    user = get_current_user(request.headers.get("authorization"))
+    return {"user": user}
+
+
+# ─── Wallet Endpoint ──────────────────────────────────────────────────────────
+
+@app.get("/api/wallet")
+def wallet(request: Request):
+    user = get_current_user(request.headers.get("authorization"))
+    w = get_wallet(user["id"])
+    if w is None:
+        raise HTTPException(status_code=404, detail="Wallet not found")
+    return {"azc": float(w["azc"]), "sats": float(w["sats"])}
+
 # ─── REST Endpoints ───────────────────────────────────────────────────────────
 
 @app.get("/api/health")
@@ -370,13 +435,38 @@ def get_ask():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/orders")
-async def create_order(order: PlaceOrderRequest):
+async def create_order(order: PlaceOrderRequest, request: Request):
+    user = get_current_user(request.headers.get("authorization"))
+    user_id = user["id"]
+
+    side       = order.side.lower()
+    order_type = order.type.lower()
+    qty        = order.quantity
+    price      = order.price
+
+    # ── Balance check ─────────────────────────────────────────────────────────
+    if order_type == "limit":
+        if side == "buy":
+            if not check_balance(user_id, "sats", qty * price):
+                raise HTTPException(status_code=400, detail="Insufficient balance")
+        else:  # sell
+            if not check_balance(user_id, "azc", qty):
+                raise HTTPException(status_code=400, detail="Insufficient balance")
+    else:  # market
+        if side == "buy":
+            if not check_balance(user_id, "sats", 1):  # any SATS > 0
+                raise HTTPException(status_code=400, detail="Insufficient balance")
+        else:  # sell
+            if not check_balance(user_id, "azc", qty):
+                raise HTTPException(status_code=400, detail="Insufficient balance")
+
     try:
         order_id = place_order(
-            side=order.side.lower(),
-            order_type=order.type.lower(),
-            price=order.price,
-            quantity=order.quantity
+            side=side,
+            order_type=order_type,
+            price=price,
+            quantity=qty,
+            user_id=user_id,
         )
         from broadcast import broadcast_orders_update
         await broadcast_orders_update()

@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { FiChevronDown, FiClock } from 'react-icons/fi'
 import Header from './components/Header'
 import LeftChart from './components/LeftChart'
@@ -12,22 +12,61 @@ import Exchange from './components/Exchange'
 import Miner from './components/Miner'
 import Login from './components/Login'
 
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+
 export default function App(){
   const [view, setView] = useState('home')
   const [priceGap, setPriceGap] = useState(1)
-  const [balances, setBalances] = useState({ azc: 133.66, sats: 50000 }) // Initial balances for testing
+  const [balances, setBalances] = useState({ azc: 0, sats: 0 })
   const [user, setUser] = useState(() => {
     const stored = localStorage.getItem('app_user')
     return stored ? JSON.parse(stored) : null
   })
 
+  // ── On load: validate stored token + fetch wallet ─────────────────────────
+  useEffect(() => {
+    if (!user?.token) return
+
+    // Validate token with backend
+    fetch(`${API_URL}/api/auth/me`, {
+      headers: { 'Authorization': `Bearer ${user.token}` }
+    })
+      .then(res => {
+        if (!res.ok) throw new Error('unauthorized')
+        return res.json()
+      })
+      .then(() => fetchWallet(user.token))
+      .catch(() => {
+        // Token invalid or expired — force re-login
+        setUser(null)
+        localStorage.removeItem('app_user')
+      })
+  }, [])   // runs once on mount
+
+  function fetchWallet(token) {
+    fetch(`${API_URL}/api/wallet`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
+      .then(res => res.ok ? res.json() : null)
+      .then(data => {
+        if (data) setBalances({ azc: data.azc, sats: data.sats })
+      })
+      .catch(() => {})  // wallet fetch failure is non-fatal
+  }
+
   function handleLogin(userData) {
-    setUser(userData)
-    localStorage.setItem('app_user', JSON.stringify(userData))
+    const flat = userData.user
+      ? { ...userData.user, token: userData.token }
+      : userData
+    setUser(flat)
+    localStorage.setItem('app_user', JSON.stringify(flat))
+    // Fetch wallet immediately after login (only for real users with a token)
+    if (flat.token) fetchWallet(flat.token)
   }
 
   function handleSignOut() {
     setUser(null)
+    setBalances({ azc: 0, sats: 0 })
     localStorage.removeItem('app_user')
   }
 
@@ -73,7 +112,11 @@ export default function App(){
               <TradeHistory />
             </div>
 
-            <BuyPanel balances={balances} />
+            <BuyPanel
+              balances={balances}
+              user={user}
+              onWalletRefresh={() => user?.token && fetchWallet(user.token)}
+            />
           </div>
         </div>
       )}

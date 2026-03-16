@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
+const WS_URL = import.meta.env.VITE_WS_URL
 
 const PRICE_GAP_OPTIONS = [1, 5, 10, 25, 50, 100, 250, 500]
 
@@ -66,7 +67,7 @@ export default function OrderBook({ priceGap, onPriceGapChange }) {
   }, [priceGap, rowDepth])
 
   const connectWebSocket = () => {
-    const websocket = new WebSocket('ws://localhost:8000/ws/orders')
+    const websocket = new WebSocket(`${WS_URL}/ws/orders`)
     wsRef.current = websocket
 
     websocket.onmessage = (event) => {

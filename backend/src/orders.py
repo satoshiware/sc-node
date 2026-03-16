@@ -1,16 +1,16 @@
 # src/orders.py
 from db import get_connection
 
-def place_order(side, order_type, price, quantity):
+def place_order(side, order_type, price, quantity, user_id=None):
     conn = get_connection()
     cur = conn.cursor()
 
     cur.execute(
         """
-        INSERT INTO orders (side, type, price, quantity, remaining_quantity, status)
-        VALUES (?, ?, ?, ?, ?, 'open')
+        INSERT INTO orders (side, type, price, quantity, remaining_quantity, status, user_id)
+        VALUES (?, ?, ?, ?, ?, 'open', ?)
         """,
-        (side, order_type, price, quantity, quantity),
+        (side, order_type, price, quantity, quantity, user_id),
     )
 
     order_id = cur.lastrowid

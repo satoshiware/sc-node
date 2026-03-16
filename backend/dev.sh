@@ -6,6 +6,7 @@ DB="db/exchange.db"
 echo "🧹 Cleaning database..."
 sqlite3 "$DB" "DELETE FROM trades;"
 sqlite3 "$DB" "DELETE FROM orders;"
+sqlite3 "$DB" "UPDATE wallets SET azc=1000.0, sats=1000000.0, updated_at=datetime('now');"
 
 echo "🚀 Starting backend services..."
 
@@ -22,7 +23,7 @@ python3 matcher.py &
 MATCHER_PID=$!
 
 sleep 1
-python3 bots.py
+##python3 bots.py
 
 echo ""
 echo "✅ Backend running"

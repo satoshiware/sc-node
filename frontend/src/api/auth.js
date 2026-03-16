@@ -4,7 +4,6 @@ export async function login(email, password) {
   const res = await fetch(`${API_BASE}/api/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
     body: JSON.stringify({ email, password }),
   })
   if (!res.ok) {
@@ -18,7 +17,6 @@ export async function register(email, password, name) {
   const res = await fetch(`${API_BASE}/api/auth/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
     body: JSON.stringify({ email, password, name: name || undefined }),
   })
   if (!res.ok) {

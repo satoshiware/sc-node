@@ -15,7 +15,7 @@ const nf = (n, opts) => new Intl.NumberFormat(undefined, opts).format(n || 0);
 
 export default function DepthChart({
   lastPrice  = null,
-  wsUrl      = "ws://localhost:8000/ws/orders",
+  wsUrl      = import.meta.env.VITE_WS_URL ? `${import.meta.env.VITE_WS_URL}/ws/orders` : null,
   depth      = 50,
   priceGap   = 1,
 }) {

@@ -1,72 +1,118 @@
-# Plan: Login & Register Authentication
+A few things I need to nail down before designing this: 
 
-## TL;DR
-- Add a `users` table to SQLite.
-- Create a `backend/src/auth.py` module for password hashing and JWT generation.
-- Implement two new endpoints: `/api/auth/register` and `/api/auth/login`.
-- Wire the existing `Login.jsx` to the real API and add a Register tab.
-- Store JWT in `localStorage` as the auth token.
-- Keep the shared order book unchanged — authentication only gates identity and future per-user features (wallet, manual orders).
+Analyzing your answers...
 
-## Steps
+Clear picture. Bots are out, users are the only order placers from now on. Here's the full plan:
 
-### 1. Add users table to `schema.sql`
-Columns:
-- `id`
-- `email` (UNIQUE)
-- `password_hash`
-- `username`
-- `created_at`
+---
 
-### 2. Install dependencies
-Add to backend requirements:
-- [`passlib[bcrypt]`](https://passlib.readthedocs.io/en/stable/) for password hashing.
-- [`python-jose[cryptography]`](https://python-jose.readthedocs.io/en/latest/) for JWT handling.
+## Plan: Testing Wallet + Auth + Live Settlement
 
-### 3. Create `backend/src/auth.py`
-Contains:
-- `hash_password(plain) → bcrypt hash`
-- `verify_password(plain, hashed) → bool`
-- `create_jwt(payload) → signed JWT string (exp = 7 days)`
-- `decode_jwt(token) → payload dict or raises`
-- Functions: `get_user_by_email(email)`, `create_user(email, username, password_hash)`
+**TL;DR:** Build a `users` + `wallets` table, real JWT auth, balance-checked order placement, and matcher-driven wallet settlement — all in sync. Bots are disabled. Users log in, place orders from BuyPanel, the matcher fills them, and both the `trades` table and wallet balances update atomically.
 
-### 4. Add auth endpoints to `api.py`
-Endpoints:
-- **POST `/api/auth/register`** — validate email uniqueness, hash password, insert user, return JWT + user info.
-- **POST `/api/auth/login`** — look up user by email, verify password, return JWT + user info.
-- **GET `/api/auth/me`** — decode JWT from Authorization header, return user info (used for session re-validation).
+---
 
-### 5. Create a FastAPI dependency in `auth.py`: `get_current_user()`
-Extracts and validates JWT from Authorization header; used to protect future endpoints like order placement and wallet.
+**Phase 1 — Schema (DB foundation)**
 
-### 6. Update `Login.jsx`
-Features:
-- Add mode toggle (`login` / `register`) with tabs or links.
-- Register form: email + username + password + confirm password.
-- Login form: email + password (keep existing styling).
-- Both forms POST to `/api/auth/login` or `/api/auth/register` via environment variable (`VITE_API_URL`).
-- On success: call `onLogin({ name, email, token })`. Token stored too.
-- Show API error messages inline (e.g., "Email already registered").
-d
-### 7. Update `App.jsx`
-such as:
-s - Extend user state to store parsed object from localStorage plus token.
-s - Save `{ name, email, token }` on login into localStorage.
-s - On app load: if token exists, validate with GET `/api/auth/me`. If invalid/expired, clear storage and show login screen.
-s - Create a hook (`useAuth()`) or pass down user.token as prop for authenticated requests. Use Authorization header: `'Bearer <token>'`. 
+1. Add to schema.sql:
+   - `users` table: `id`, `email` (UNIQUE), `name`, `password_hash`, `created_at`
+   - `wallets` table: `id`, `user_id` FK → users, `azc` NUMERIC DEFAULT 0, `sats` NUMERIC DEFAULT 0, `updated_at`
+   - `ALTER TABLE orders ADD COLUMN user_id INTEGER REFERENCES users(id)` — nullable, bot orders stay NULL
 
-## Verification Criteria
-1. POST `/api/auth/register` with new email returns `{ token, user }`, and user appears in DB.
-p2. POST `/api/auth/login` with wrong password returns 401 error.
-p3. Correct login returns JWT; stored in localStorage; app loads logged-in state.
-p4. Refresh page triggers GET `/api/auth/me`, validating token; remains logged in if valid.
-p5. Token expiry after 7 days clears localStorage and redirects to login screen.
+2. Create `backend/db/seed.py` — inserts 3–5 test users with bcrypt-hashed passwords + starting balances (e.g. `1000 AZC`, `5,000,000 SATS` each). Run once to populate.
 
-## Decisions Summary
--JWT over session tokens — stateless; no DB sessions needed.
-d-Use passlib[bcrypt] for industry-standard password hashing—no manual salt management required.
-d-Store token in localStorage (current pattern). While httpOnly cookies are more secure,
-they require CORS cookie configuration which is not implemented here.
-d-Combine Register & Login UI into one file (`Login.jsx`) with mode toggle for simplicity of routing.
-d-Store users table within existing database (`exchange.db`)—consistent with current infrastructure.
+3. Run migration: `ALTER TABLE orders ADD COLUMN user_id INTEGER REFERENCES users(id)` against live `exchange.db` (non-destructive, no data loss)
+
+---
+
+**Phase 2 — Backend auth & wallet logic**
+
+4. **Create `backend/src/auth.py`**:
+   - `hash_password(plain)` → bcrypt string
+   - `verify_password(plain, hashed)` → bool
+   - `create_jwt(user_id, email, name)` → signed token, 7-day expiry, `SECRET_KEY` from .env
+   - `decode_jwt(token)` → payload dict or raises `401`
+   - `get_user_by_email(email)`, `create_user(email, name, password_hash)` → DB helpers
+
+5. **Create `backend/src/wallets.py`**:
+   - `get_wallet(user_id)` → `{ azc, sats }`
+   - `check_balance(user_id, asset, amount)` → bool (used before order placement)
+   - `settle_trade(buy_order_id, sell_order_id, qty, price)` — called by matcher:
+     - Looks up `user_id` on each order
+     - If buyer has `user_id`: `azc += qty`, `sats -= qty × price`
+     - If seller has `user_id`: `azc -= qty`, `sats += qty × price`
+     - Skips NULL `user_id` sides (old bot orders in DB, nothing to settle)
+   - All updates atomic within the same connection/transaction passed in from matcher
+
+6. **Add auth + wallet endpoints in api.py**:
+   - `POST /api/auth/register` → hash password → insert user + create wallet with default balance → return `{ token, user: { id, name, email } }`
+   - `POST /api/auth/login` → verify password → return `{ token, user: { id, name, email } }`
+   - `GET /api/auth/me` → decode Bearer token → return user info (validates stored token on load)
+   - `GET /api/wallet` → requires Bearer token → return `{ azc, sats }`
+ ---------------------------------- current checkpoint! -------------------------------------------
+ 
+7. **Update `POST /api/orders`**:
+   - Require `Authorization: Bearer <token>` header — decode to get `user_id`
+   - Check `wallets.check_balance()` before inserting:
+     - BUY (limit): needs `qty × price` SATS
+     - SELL (limit): needs `qty` AZC  
+     - MARKET BUY: needs any SATS > 0 (fill price unknown; full deduction happens at settlement)
+     - MARKET SELL: needs `qty` AZC
+   - If insufficient → return `400 { detail: "Insufficient balance" }`
+   - Tag order with `user_id` on insert
+
+---
+
+**Phase 3 — Matcher settlement**
+
+8. **Update matcher.py**:
+   - Import `settle_trade` from `wallets.py`
+   - After each `_fill()` inside the matching cycle, call `settle_trade(bid_id, ask_id, qty, exec_price, cur)` — **pass the same cursor** so it's part of the same atomic transaction
+   - On commit: trades table + wallet updates all committed together. On rollback: all reverted.
+
+---
+
+**Phase 4 — Disable bots**
+
+9. **bots.py**: add a `BOTS_ENABLED` flag read from .env. Set `BOTS_ENABLED=false` in `backend/.env`. No code deletion — just gated so they can be re-enabled for testing.
+
+---
+
+**Phase 5 — Frontend wiring**
+
+10. **auth.js**: already calls correct endpoints. Verify response shape matches `{ token, user: { id, name, email } }`.
+
+11. **App.jsx**:
+    - Extend stored user shape to include `token`: `{ id, name, email, token }`
+    - On app load: call `GET /api/auth/me` with stored token → 401 = clear + show login, 200 = keep logged in
+    - Pass `user` to `<BuyPanel user={user} />`
+    - Add `balances` fetch: `GET /api/wallet` with token → `setBalances({ azc, sats })`
+
+12. **BuyPanel.jsx**:
+    - Add `Authorization: Bearer ${user.token}` header to `POST /api/orders`
+    - After success, re-fetch wallet: `GET /api/wallet` → update `balances` via callback to App.jsx
+
+13. **Wallet.jsx**:
+    - Replace hardcoded balances with `GET /api/wallet` (already gets `balances` prop from App.jsx — just needs App.jsx to fetch real data)
+
+14. **Login.jsx**:
+    - Keep mock fallback ✅ — mock users have no `token`, BuyPanel sends no auth header, orders get `user_id = NULL`
+
+---
+
+**Verification**
+1. Run `seed.py` → check 3+ users + wallets in DB
+2. Login as test user → `GET /api/auth/me` returns correct user → token valid
+3. Place limit sell 10 AZC → wallet shows `azc - 10` immediately in Wallet view
+4. Place limit buy matching the sell → matcher fills → `trades` row + wallet settlement in same commit → both users' balances updated
+5. Place buy with 0 SATS → `400 Insufficient balance` returned
+6. Refresh page → token re-validated, stay logged in
+7. `BOTS_ENABLED=false` → bots do not insert any orders
+
+---
+
+**Decisions**
+- No "reserved" balance concept yet — balance is checked at order time and deducted at fill time; double-spend possible only if two orders race (acceptable for now, can add reservation later)
+- Wallet balance for new registrations: set in api.py `register` handler to a configurable default (e.g. `1000 AZC`, `5,000,000 SATS`) — same as seed data
+- Matcher settlement runs in same transaction as the fill — atomically consistent, no partial state
+- `SECRET_KEY` for JWT goes in `backend/.env` — never hardcoded
