@@ -5,7 +5,6 @@
 #
 # Purpose:
 #   - Enrolls TPM2 key for LUKS auto-unlock (PCRs 0+7) using systemd-cryptenroll
-#   - Wipes the temporary passphrase (TPM-only unlock)
 #   - Configures dracut to include tpm2-tss + crypt modules in initramfs
 #   - Appends rd.luks.options=tpm2-device=auto to GRUB_CMDLINE_LINUX
 #   - Sets up passwordless sudo for user 'satoshi'
@@ -51,19 +50,12 @@ fi
 log "Detected LUKS device: $LUKSDEV"
 
 # TPM2 enrollment
-TEMP_PASS="tempPassPhrase123!" # Update this if you change it in preseed.cfg
+TEMP_PASS="SatoshiIsMyWitness123!" # Need passphrase to register TMP2 - Update to always match in preseed.cfg
 echo "$TEMP_PASS" | systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=0+7 "$LUKSDEV" || {
     log "ERROR: TPM2 enrollment failed on $LUKSDEV"
     exit 1
 }
 log "TPM2 enrollment succeeded on $LUKSDEV"
-
-# Wipe the password keyslot
-systemd-cryptenroll --wipe-slot=password "$LUKSDEV" || {
-    log "Error: Passphrase wipe failed"
-    exit 1
-}
-log "Temporary Passphrase Wiped"
 
 # dracut config – ensure TPM modules in initramfs
 echo 'add_dracutmodules+=" tpm2-tss crypt "' > /etc/dracut.conf.d/tpm2.conf || {
