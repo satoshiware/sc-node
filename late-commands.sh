@@ -50,7 +50,7 @@ log "Passwordless sudo configured for satoshi"
 cat > /etc/systemd/system/firstboot-setup.service << EOF
 [Unit]
 Description=One-time first-boot Debian setup
-After=network-online.target sshd.service
+After=multi-user.target network-online.target sshd.service
 Wants=network-online.target
 
 [Service]
