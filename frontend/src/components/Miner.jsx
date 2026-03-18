@@ -1,24 +1,76 @@
-import React, { useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { FiChevronLeft } from 'react-icons/fi'
-import { Line } from 'react-chartjs-2'
+import { Bar, Line } from 'react-chartjs-2'
 import {
   Chart as ChartJS,
   CategoryScale,
   LinearScale,
   PointElement,
   LineElement,
+  BarElement,
   Tooltip,
   Legend,
 } from 'chart.js'
 
-ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip, Legend)
+ChartJS.register(
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  BarElement,
+  Tooltip,
+  Legend
+)
 
-export default function Miner({ setView }) {
+export default function Miner({ setView, user }) {
   const [showBanner, setShowBanner] = useState(true)
 
   const handleCloseBanner = () => {
     setShowBanner(false)
   }
+
+  const [dailyRewards, setDailyRewards] = useState(null) // null=loading, []=no rewards, array=has rewards
+
+  // Mock daily rewards (BTC) shaped for the rewards bar chart.
+  // In a real setup, this should be fetched from the backend per account.
+  const mockDailyRewards = useMemo(() => {
+    const start = new Date('2026-02-16T00:00:00Z')
+    const out = []
+    for (let i = 0; i < 30; i++) {
+      const d = new Date(start.getTime() + i * 86400000)
+      const dayLabel = `${String(d.getUTCDate()).padStart(2, '0')}.${String(
+        d.getUTCMonth() + 1
+      ).padStart(2, '0')}`
+
+      // Make last ~6 days higher, matching your screenshot look.
+      const isLate = i >= 24
+      const isVeryLate = i >= 28
+
+      const mining = isLate
+        ? isVeryLate
+          ? 0.00000014 + (i - 28) * 0.00000001
+          : 0.00000011 + (i - 24) * 0.00000001
+        : 0.00000002 + i * 0.000000001
+
+      out.push({
+        dayLabel,
+        mining,
+      })
+    }
+    return out
+  }, [])
+
+  // Show message for "new to account" users, then show chart if they already visited before.
+  useEffect(() => {
+    const key = user?.id != null ? `miner_daily_rewards_seen_${user.id}` : 'miner_daily_rewards_seen_guest'
+    const seen = localStorage.getItem(key)
+    if (seen) {
+      setDailyRewards(mockDailyRewards)
+      return
+    }
+    setDailyRewards([])
+    localStorage.setItem(key, '1')
+  }, [mockDailyRewards, user?.id])
 
   // Mock data for recent hashrate and active workers
   const labels = ['18:00', '18:10', '18:20', '18:30', '18:40', '18:50', '19:00', '19:10', '19:20']
@@ -98,6 +150,80 @@ export default function Miner({ setView }) {
       },
     },
   }
+
+  const dailyRewardsChartData = useMemo(() => {
+    if (!dailyRewards || dailyRewards.length === 0) return null
+    return {
+      labels: dailyRewards.map((d) => d.dayLabel),
+      datasets: [
+        {
+          label: 'Mining Reward',
+          data: dailyRewards.map((d) => d.mining),
+          backgroundColor: 'rgba(99,102,241,0.85)', // indigo-500
+          borderWidth: 0,
+          // Narrower bars (smaller than the default bar width in the category).
+          barPercentage: 0.55,
+          categoryPercentage: 0.85,
+          maxBarThickness: 12,
+        },
+      ],
+    }
+  }, [dailyRewards])
+
+  const dailyRewardsChartOptions = useMemo(
+    () => ({
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          position: 'bottom',
+          labels: {
+            boxWidth: 10,
+            boxHeight: 10,
+            usePointStyle: true,
+          },
+        },
+        tooltip: {
+          callbacks: {
+            label(context) {
+              const label = context.dataset.label || ''
+              const v = Number(context.parsed.y) || 0
+              return `${label}: ${v.toFixed(8)} BTC`
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          ticks: {
+            color: '#9CA3AF',
+            maxTicksLimit: 6,
+          },
+          grid: { display: false },
+          // Draw the bottom axis border to match the reference UI.
+          border: {
+            display: true,
+            color: 'rgba(156,163,175,0.55)',
+            width: 1,
+          },
+        },
+        y: {
+          ticks: {
+            color: '#9CA3AF',
+            callback: (v) => `${Number(v).toFixed(8)} BTC`,
+          },
+          grid: { color: 'rgba(156,163,175,0.15)' },
+          // Draw the left axis border to match the reference UI.
+          border: {
+            display: true,
+            color: 'rgba(156,163,175,0.55)',
+            width: 1,
+          },
+        },
+      },
+    }),
+    []
+  )
 
   return (
     <div className="min-h-screen p-2 sm:p-4">
@@ -272,9 +398,32 @@ export default function Miner({ setView }) {
                 </div>
               </div>
 
-              <div className="mt-2 text-xs sm:text-sm text-gray-400 bg-gray-900/60 border border-dashed border-gray-700 rounded-md px-3 py-3">
-                You have no daily rewards yet. Your rewards for each day will appear here once confirmed and finalized.
-              </div>
+              {dailyRewards == null ? (
+                <div className="mt-2 text-xs sm:text-sm text-gray-400 bg-gray-900/60 border border-dashed border-gray-700 rounded-md px-3 py-3">
+                  Loading rewards…
+                </div>
+              ) : dailyRewards.length === 0 ? (
+                <div className="mt-2 text-xs sm:text-sm text-gray-400 bg-gray-900/60 border border-dashed border-gray-700 rounded-md px-3 py-3">
+                  You have no daily rewards yet. Your rewards for each day will appear here once confirmed and finalized.
+                </div>
+              ) : (
+                <div className="mt-2">
+                  <div className="flex items-center justify-between gap-2 mb-2 text-xs sm:text-sm text-gray-400">
+                    <div className="inline-flex items-center gap-2">
+                      Rewards In last 30 days
+                      <span className="inline-flex w-4 h-4 items-center justify-center rounded-full border border-gray-600 text-[10px] text-gray-500">
+                        i
+                      </span>
+                    </div>
+                    <button className="text-xs text-blue-400 hover:text-blue-300">
+                      Rewards history
+                    </button>
+                  </div>
+                  <div className="h-48 sm:h-56 rounded-md bg-white/5 border border-gray-700 px-2 py-1">
+                    <Bar data={dailyRewardsChartData} options={dailyRewardsChartOptions} />
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Pool statistics */}

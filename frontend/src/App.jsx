@@ -85,7 +85,7 @@ export default function App(){
       ) : view === 'exchange' ? (
         <Exchange setView={setView} />
       ) : view === 'miner' ? (
-        <Miner setView={setView} />
+        <Miner setView={setView} user={user} />
       ) : (
         <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-12 lg:gap-4 xl:gap-4">
           <div className="flex flex-col gap-4 md:col-span-8 xl:col-span-8">
