@@ -31,7 +31,7 @@ export default function Miner({ setView, user }) {
 
   const [dailyRewards, setDailyRewards] = useState(null) // null=loading, []=no rewards, array=has rewards
 
-  // Mock daily rewards (BTC) shaped for the rewards bar chart.
+  // Mock daily rewards (AZC) shaped for the rewards bar chart.
   // In a real setup, this should be fetched from the backend per account.
   const mockDailyRewards = useMemo(() => {
     const start = new Date('2026-02-16T00:00:00Z')
@@ -188,7 +188,7 @@ export default function Miner({ setView, user }) {
             label(context) {
               const label = context.dataset.label || ''
               const v = Number(context.parsed.y) || 0
-              return `${label}: ${v.toFixed(8)} BTC`
+              return `${label}: ${v.toFixed(8)} AZC`
             },
           },
         },
@@ -210,7 +210,7 @@ export default function Miner({ setView, user }) {
         y: {
           ticks: {
             color: '#9CA3AF',
-            callback: (v) => `${Number(v).toFixed(8)} BTC`,
+            callback: (v) => `${Number(v).toFixed(8)} AZC`,
           },
           grid: { color: 'rgba(156,163,175,0.15)' },
           // Draw the left axis border to match the reference UI.
@@ -378,23 +378,23 @@ export default function Miner({ setView, user }) {
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4 text-xs sm:text-sm">
                 <div>
                   <div className="text-gray-400 mb-1">Today's Mining Rewards</div>
-                  <div className="text-lg font-semibold text-white">0.00000007 BTC</div>
+                  <div className="text-lg font-semibold text-white">0.00000007 AZC</div>
                   <div className="text-gray-500 text-xs">≈ $0.00 USD</div>
                 </div>
                 <div>
                   <div className="text-gray-400 mb-1">Yesterday's Total Reward</div>
-                  <div className="text-lg font-semibold text-white">0.00000000 BTC</div>
-                  <div className="text-gray-500 text-xs">Est. Profitability: 0.00000034 BTC</div>
+                  <div className="text-lg font-semibold text-white">0.00000000 AZC</div>
+                  <div className="text-gray-500 text-xs">Est. Profitability: 0.00000034 AZC</div>
                 </div>
                 <div>
                   <div className="text-gray-400 mb-1">All Time Reward</div>
-                  <div className="text-lg font-semibold text-white">0.00000000 BTC</div>
+                  <div className="text-lg font-semibold text-white">0.00000000 AZC</div>
                   <div className="text-gray-500 text-xs">Reward scheme: FPPS (fee 2.5%)</div>
                 </div>
                 <div>
                   <div className="text-gray-400 mb-1">Next Payout ETA</div>
                   <div className="text-lg font-semibold text-white">—</div>
-                  <div className="text-gray-500 text-xs">Account balance: 0.00000000 BTC</div>
+                  <div className="text-gray-500 text-xs">Account balance: 0.00000000 AZC</div>
                 </div>
               </div>
 
