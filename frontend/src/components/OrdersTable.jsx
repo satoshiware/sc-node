@@ -1,34 +1,87 @@
-import React, { useState, useEffect } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 
 const WS_URL = import.meta.env.VITE_WS_URL
 const API_URL = import.meta.env.VITE_API_URL
 
-export default function OrdersTable(){
+export default function OrdersTable({ onlyMyOrders = false, user = null }) {
   const [orders, setOrders] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
-  const [ws, setWs] = useState(null)
 
-  useEffect(() => {
-    connectWebSocket()
-    return () => {
-      if (ws) {
-        ws.close()
-      }
-    }
-  }, [])
+  const wsRef = useRef(null)
+  const pollRef = useRef(null)
+  const reconnectRef = useRef(null)
+
   const displayPrice = (p) => {
-  if (p == null || p === "0") return "—";
-  return typeof p === 'number' ? p.toLocaleString() : p;
-}
+    if (p == null || p === '0') return '—'
+    return typeof p === 'number' ? p.toLocaleString() : p
+  }
+
+  const clearPolling = () => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current)
+      pollRef.current = null
+    }
+  }
+
+  const clearReconnect = () => {
+    if (reconnectRef.current) {
+      clearTimeout(reconnectRef.current)
+      reconnectRef.current = null
+    }
+  }
+
+  const closeWs = () => {
+    if (wsRef.current) {
+      wsRef.current.onclose = null
+      wsRef.current.close()
+      wsRef.current = null
+    }
+  }
+
+  const fetchOrders = async () => {
+    const endpoint = onlyMyOrders ? '/api/orders/mine' : '/api/orders/poll'
+    const headers =
+      onlyMyOrders && user?.token
+        ? { Authorization: `Bearer ${user.token}` }
+        : {}
+
+    const res = await fetch(`${API_URL}${endpoint}`, { headers })
+    const data = await res.json()
+
+    if (!res.ok) {
+      throw new Error(data?.detail || 'Failed to fetch orders')
+    }
+
+    setOrders(data.orders || [])
+    setError(null)
+    setLoading(false)
+  }
+
+  const startPolling = () => {
+    clearPolling()
+    fetchOrders().catch((err) => {
+      console.error('Polling error:', err)
+      setError(err.message || 'Failed to fetch orders')
+      setLoading(false)
+    })
+
+    pollRef.current = setInterval(() => {
+      fetchOrders().catch((err) => {
+        console.error('Polling error:', err)
+        setError(err.message || 'Failed to fetch orders')
+      })
+    }, 2000)
+  }
 
   const connectWebSocket = () => {
     try {
       const websocket = new WebSocket(`${WS_URL}/ws/orders`)
-      
+      wsRef.current = websocket
+
       websocket.onopen = () => {
-        console.log('WebSocket connected')
         setLoading(false)
+        setError(null)
       }
 
       websocket.onmessage = (event) => {
@@ -39,48 +92,49 @@ export default function OrdersTable(){
         }
       }
 
-      websocket.onerror = (error) => {
-        console.error('WebSocket error:', error)
+      websocket.onerror = (event) => {
+        console.error('WebSocket error:', event)
         setError('Failed to connect to order updates')
         setLoading(false)
-        // Fallback to polling
+        closeWs()
         startPolling()
       }
 
       websocket.onclose = () => {
-        console.log('WebSocket disconnected, attempting to reconnect...')
-        // Attempt to reconnect after 3 seconds
-        setTimeout(connectWebSocket, 3000)
+        if (onlyMyOrders) return
+        clearReconnect()
+        reconnectRef.current = setTimeout(() => {
+          connectWebSocket()
+        }, 3000)
       }
-
-      setWs(websocket)
     } catch (err) {
       console.error('WebSocket connection error:', err)
       setError('Failed to establish WebSocket connection')
       setLoading(false)
-      // Fallback to polling
       startPolling()
     }
   }
 
-  const startPolling = () => {
-    // Fallback: poll every 2 seconds
-    const interval = setInterval(() => {
-      fetch(`${API_URL}/api/orders/poll`)
-        .then(res => res.json())
-        .then(data => {
-          setOrders(data.orders || [])
-          setError(null)
-          setLoading(false)
-        })
-        .catch(err => {
-          console.error('Polling error:', err)
-          setError('Failed to fetch orders')
-        })
-    }, 2000)
+  useEffect(() => {
+    setLoading(true)
+    setError(null)
 
-    return () => clearInterval(interval)
-  }
+    clearPolling()
+    clearReconnect()
+    closeWs()
+
+    if (onlyMyOrders) {
+      startPolling()
+    } else {
+      connectWebSocket()
+    }
+
+    return () => {
+      clearPolling()
+      clearReconnect()
+      closeWs()
+    }
+  }, [onlyMyOrders, user?.token])
 
   const handleCancel = (order) => {
     alert(`Cancel requested for order placed ${order.time}`)
@@ -105,10 +159,8 @@ export default function OrdersTable(){
         <div className="text-right">Actions</div>
       </div>
 
-      <div
-        className="mt-2 space-y-2 text-xs sm:text-sm max-h-48 sm:max-h-56 md:max-h-64 overflow-y-auto pr-2 scrollbar-dark"
-      >
-        {orders.map((o,i)=> (
+      <div className="mt-2 space-y-2 text-xs sm:text-sm max-h-48 sm:max-h-56 md:max-h-64 overflow-y-auto pr-2 scrollbar-dark">
+        {orders.map((o, i) => (
           <div key={o.id || i} className="grid grid-cols-8 gap-1 sm:gap-2 text-gray-200 items-center min-w-[520px]">
             <div className="text-xs text-gray-200 truncate">{o.time}</div>
             <div className="truncate">{o.type}</div>
@@ -116,7 +168,9 @@ export default function OrdersTable(){
             <div className="truncate">{displayPrice(o.priceSats)}</div>
             <div className="truncate">{o.amount}</div>
             <div className="truncate">{o.total}</div>
-            <div className={o.status === 'Open' ? 'text-green-300' : o.status === 'Filled' ? 'text-gray-400' : 'text-yellow-300'}>{o.status}</div>
+            <div className={o.status === 'Open' ? 'text-green-300' : o.status === 'Filled' ? 'text-gray-400' : 'text-yellow-300'}>
+              {o.status}
+            </div>
             <div className="text-right">
               {o.status === 'Open' && o.type === 'Limit' ? (
                 <button onClick={() => handleCancel(o)} className="text-sm text-red-400 hover:underline">Cancel</button>

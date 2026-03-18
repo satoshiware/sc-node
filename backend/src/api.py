@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Path, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
 import asyncio
-from orders import get_open_orders, get_best_bid, get_best_ask, place_order, get_all_user_orders, get_order_by_id
+from orders import get_open_orders, get_best_bid, get_best_ask, place_order, get_all_user_orders, get_order_by_id,get_orders_by_user
 from trades import get_all_trades
 from candles import get_historical_candles
 from market_stats import get_market_stats
@@ -383,6 +383,13 @@ def me(request: Request):
     user = get_current_user(request.headers.get("authorization"))
     return {"user": user}
 
+@app.get("/api/orders/mine")
+def poll_my_orders(request: Request):
+    user = get_current_user(request.headers.get("authorization"))
+    try:
+        return {"orders": [format_order(o) for o in get_orders_by_user(user["id"])]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ─── Wallet Endpoint ──────────────────────────────────────────────────────────
 

@@ -19,6 +19,25 @@ def place_order(side, order_type, price, quantity, user_id=None):
 
     return order_id
 
+def get_orders_by_user(user_id: int):
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT *
+        FROM orders
+        WHERE user_id = ?
+        ORDER BY created_at DESC
+        """,
+        (user_id,)
+    )
+
+    rows = cur.fetchall()
+    conn.close()
+
+    return [dict(row) for row in rows]
+
 def get_all_user_orders():
     """Get all orders (open, partial, filled, cancelled)"""
     conn = get_connection()
