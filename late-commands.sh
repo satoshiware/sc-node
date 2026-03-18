@@ -4,9 +4,7 @@
 # Runs in the target's chroot environment (/target).
 #
 # Purpose:
-#   - Enrolls TPM2 key for LUKS auto-unlock (PCRs 0+7) using systemd-cryptenroll
-#   - Configures dracut to include tpm2-tss + crypt modules in initramfs
-#   - Appends rd.luks.options=tpm2-device=auto to GRUB_CMDLINE_LINUX
+#   - Validates LUKS device existence right after partitioning
 #   - Sets up passwordless sudo for user 'satoshi'
 #   - Creates and enables a one-time first-boot systemd service
 #     to run /root/sc-node/firstboot.sh
@@ -21,17 +19,11 @@
 # Debugging tips:
 #   - During install: Alt+F4 → see live logs
 #   - After reboot: check /var/log/late-commands.log
-#   - Verify TPM enrollment: systemd-cryptenroll --status <LUKSDEV>
-#   - Check initramfs: lsinitramfs /boot/initrd.img-* | grep tpm2
-#
-# Assumptions:
-#   - fTPM 2.0 enabled in UEFI + Secure Boot on
-#   - Temporary passphrase matches the one set in preseed.cfg
 # =============================================================================
 set -e
 
 # Logging helper: syslog + persistent file, no levels, no per-line timestamp
-LOGFILE="/var/log/late-commands.sh.log"
+LOGFILE="/var/log/late-commands.log"
 log() {
     local message="$1"
     echo "$message" >> "$LOGFILE"
@@ -41,49 +33,13 @@ log() {
 # Log start
 log "late-commands.sh started at $(date)"
 
-# Detect LUKS device (reliable in chroot post-partitioning)
+# Fail-fast: Abort if no crypto_LUKS found (post-partman validation + log)
 LUKSDEV=$(blkid -t TYPE=crypto_LUKS -o device | head -n1)
 if [ -z "$LUKSDEV" ]; then
     log "ERROR: No LUKS device found"
     exit 1
 fi
 log "Detected LUKS device: $LUKSDEV"
-
-# TPM2 enrollment
-TEMP_PASS="SatoshiIsMyWitness123!" # Need passphrase to register TMP2 - Update to always match in preseed.cfg
-echo "$TEMP_PASS" | systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=0+7 "$LUKSDEV" || {
-    log "ERROR: TPM2 enrollment failed on $LUKSDEV"
-    exit 1
-}
-log "TPM2 enrollment succeeded on $LUKSDEV"
-
-# dracut config – ensure TPM modules in initramfs
-echo 'add_dracutmodules+=" tpm2-tss crypt "' > /etc/dracut.conf.d/tpm2.conf || {
-    log "Error: Failed to write dracut.conf"
-    exit 1
-}
-log "dracut config written"
-
-# Regenerate all initramfs (critical for TPM early unlock)
-dracut -f --regenerate-all || {
-    log "Error: dracut regeneration failed"
-    exit 1
-}
-log "dracut regeneration completed"
-
-# GRUB: append rd.luks.options for cryptsetup to use TPM auto-unlock
-sed -i '/^GRUB_CMDLINE_LINUX=/ s/"$/ rd.luks.options=tpm2-device=auto"/' /etc/default/grub || {
-    log "Error: Failed to modify GRUB_CMDLINE_LINUX"
-    exit 1
-}
-log "GRUB rd.luks.options appended"
-
-# Update GRUB configuration (applies rd.luks.options for TPM auto-unlock)
-update-grub || {
-    log "Error: update-grub failed"
-    exit 1
-}
-log "GRUB configuration updated successfully"
 
 # Configure passwordless sudo for satoshi
 echo "satoshi ALL=(ALL:ALL) NOPASSWD:ALL" > /etc/sudoers.d/satoshi
