@@ -55,14 +55,32 @@ else
 fi
 
 # ────────────────────────────────────────────────
-# System update & cleanup
+# System update & cleanup — with lock conflict prevention
 # ────────────────────────────────────────────────
-log "Updating system packages..."
-apt update -y
-apt upgrade -y
-apt autoremove -y
-apt autoclean -y
-log "System update complete"
+log "Preventing apt-daily timer conflicts..."
+systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+systemctl stop apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+log "apt-daily timers/services stopped (if active)"
+
+log "Updating system packages (with lock timeout & retry)..."
+for attempt in {1..3}; do
+    log "Update/Upgrade attempt $attempt/3..."
+    if DEBIAN_FRONTEND=noninteractive \
+       apt -o DPkg::Lock::Timeout=300 update -y && \
+       DEBIAN_FRONTEND=noninteractive \
+       apt -o DPkg::Lock::Timeout=300 upgrade -y && \
+       DEBIAN_FRONTEND=noninteractive apt autoremove -y && \
+       apt autoclean -y; then
+        log "System update complete on attempt $attempt"
+        break
+    else
+        log "Update attempt $attempt failed — waiting 30s before retry..."
+        sleep 30
+    fi
+done || { log "ERROR: All update attempts failed — check logs"; exit 1; }
+
+# Restart timers after update
+systemctl start apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
 
 # ────────────────────────────────────────────────
 # Python symlink (python → python3)
