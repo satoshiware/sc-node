@@ -61,7 +61,7 @@ export default function OrderManagement({ setView, user, onSignOut }){
           </div>
 
           <div className="mt-4 min-w-0">
-            <OrdersTable onlyMyOrders={true} user={user} />
+            <OrdersTable onlyMyOrders={true} user={user} variant="management" />
           </div>
         </div>
         </div>
