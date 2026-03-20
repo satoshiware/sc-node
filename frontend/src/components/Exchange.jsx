@@ -1,69 +1,50 @@
-import React from 'react'
+import React, { useEffect, useState } from 'react'
 import { FiChevronLeft } from 'react-icons/fi'
-import MarketSelect from './MarketSelect'
+
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
 export default function Exchange({ setView, user, balances }) {
-  const accountNumber = user?.id ?? 14
+  const [exchangeRows, setExchangeRows] = useState([])
+  const [loadingTrades, setLoadingTrades] = useState(true)
+
+  useEffect(() => {
+    if (!user?.token) return
+
+    setLoadingTrades(true)
+    fetch(`${API_URL}/api/trades/mine`, {
+      headers: { Authorization: `Bearer ${user.token}` },
+    })
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error('Failed to fetch trades'))))
+      .then((data) => {
+        setExchangeRows(data?.trades || [])
+      })
+      .catch((err) => {
+        console.error('Failed to fetch trades:', err)
+        setExchangeRows([])
+      })
+      .finally(() => setLoadingTrades(false))
+  }, [user?.token])
+
+  const accountNumber = user?.id ?? '—'
   const fullName =
-    user?.name ||
-    `${user?.first_name ?? ''} ${user?.last_name ?? ''}`.trim() ||
-    '—'
+    user?.name || `${user?.first_name ?? ''} ${user?.last_name ?? ''}`.trim() || '—'
   const email = user?.email || user?.username || '—'
   const phone = user?.phone || '—'
 
   const totalSats = balances?.sats ?? 0
   const totalCoins = balances?.azc ?? 0
 
-  // Static rows shaped to closely mirror the spreadsheet Exchange section.
-  const exchangeRows = [
-    {
-      id: 1,
-      direction: 'In',
-      limitMarket: 'Limit',
-      boughtSold: 'Bought',
-      amountCoins: 2.0,
-      priceSats: 422,
-      totalSats: 422,
-      feeSats: 3,
-      time: '3/13/2026 9:37:47',
-    },
-    {
-      id: 2,
-      direction: 'In',
-      limitMarket: 'Limit',
-      boughtSold: 'Bought',
-      amountCoins: 1.0,
-      priceSats: 422,
-      totalSats: 422,
-      feeSats: 3,
-      time: '3/13/2026 9:31:38',
-    },
-    {
-      id: 3,
-      direction: 'Out',
-      limitMarket: 'Limit',
-      boughtSold: 'Sold',
-      amountCoins: 1.0,
-      priceSats: 459,
-      totalSats: 459,
-      feeSats: 3,
-      time: '3/12/2026 22:35:48',
-    },
-  ]
-
   const satsBought = exchangeRows
     .filter((r) => r.boughtSold === 'Bought')
-    .reduce((sum, r) => sum + r.totalSats, 0)
+    .reduce((sum, r) => sum + Number(r.totalSats || 0), 0)
+
   const satsSold = exchangeRows
     .filter((r) => r.boughtSold === 'Sold')
-    .reduce((sum, r) => sum + r.totalSats, 0)
-  const totalFees = exchangeRows.reduce((sum, r) => sum + r.feeSats, 0)
-  const satsNet = satsSold - satsBought - totalFees
+    .reduce((sum, r) => sum + Number(r.totalSats || 0), 0)
 
-  const thirtyDayVol = exchangeRows.reduce(
-    (sum, r) => sum + r.totalSats,
-    0
-  )
+  const totalFees = exchangeRows.reduce((sum, r) => sum + Number(r.feeSats || 0), 0)
+  const satsNet = satsSold - satsBought - totalFees
+  const thirtyDayVol = exchangeRows.reduce((sum, r) => sum + Number(r.totalSats || 0), 0)
 
   return (
     <div className="min-h-screen p-2 sm:p-4">
@@ -206,13 +187,13 @@ export default function Exchange({ setView, user, balances }) {
                 </tr>
               </thead>
               <tbody className="text-gray-200">
-                {exchangeRows.length === 0 ? (
+                {loadingTrades ? (
                   <tr>
                     <td
                       colSpan={8}
                       className="px-3 py-10 text-center text-gray-500 border-t border-gray-700"
                     >
-                      No exchange history yet.
+                      Loading trades...
                     </td>
                   </tr>
                 ) : (

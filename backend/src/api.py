@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
 import asyncio
 from orders import get_open_orders, get_best_bid, get_best_ask, place_order, get_all_user_orders, get_order_by_id,get_orders_by_user
-from trades import get_all_trades
+from trades import get_all_trades, get_trades_by_user
 from candles import get_historical_candles
 from market_stats import get_market_stats
 from pydantic import BaseModel
@@ -189,6 +189,18 @@ class TradeResponse(BaseModel):
     quantity: str
     side: str
 
+class MyTradeResponse(BaseModel):
+    id: int
+    direction: str
+    limitMarket: str
+    boughtSold: str
+    amountCoins: float
+    priceSats: float
+    totalSats: float
+    feeSats: float
+    time: str
+
+
 # ─── Formatters ───────────────────────────────────────────────────────────────
 
 def format_order(order_dict):
@@ -258,6 +270,35 @@ def format_trade(trade_dict):
         quantity=quantity,
         side=side
     )
+
+def format_my_trade(trade_dict, user_id: int):
+    price = float(trade_dict["price"])
+    qty = float(trade_dict["quantity"])
+    is_buyer = int(trade_dict["buyer_user_id"]) == int(user_id)
+
+    direction = "In" if is_buyer else "Out"
+    bought_sold = "Bought" if is_buyer else "Sold"
+    order_type = trade_dict["buyer_order_type"] if is_buyer else trade_dict["seller_order_type"]
+
+    executed_at = trade_dict.get("executed_at")
+    if isinstance(executed_at, str):
+        dt = datetime.fromisoformat(executed_at)
+    else:
+        dt = executed_at
+    time_str = dt.strftime("%m/%d/%y %H:%M:%S")
+
+    return MyTradeResponse(
+        id=trade_dict["id"],
+        direction=direction,
+        limitMarket=(order_type or "market").capitalize(),
+        boughtSold=bought_sold,
+        amountCoins=qty,
+        priceSats=price,
+        totalSats=price * qty,
+        feeSats=0.0,  # no fee column in schema yet
+        time=time_str,
+    )
+
 
 # ─── WebSocket Endpoints ──────────────────────────────────────────────────────
 
@@ -390,7 +431,7 @@ def poll_my_orders(request: Request):
         return {"orders": [format_order(o) for o in get_orders_by_user(user["id"])]}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
+    
 # ─── Wallet Endpoint ──────────────────────────────────────────────────────────
 
 @app.get("/api/wallet")
@@ -492,6 +533,15 @@ def get_trades():
 def poll_trades():
     try:
         return {"trades": [format_trade(t) for t in get_all_trades()]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/trades/mine")
+def poll_my_trades(request: Request):
+    user = get_current_user(request.headers.get("authorization"))
+    try:
+        rows = get_trades_by_user(user["id"])
+        return {"trades": [format_my_trade(t, user["id"]) for t in rows]}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -83,7 +83,7 @@ export default function App(){
       ) : view === 'wallet' ? (
         <Wallet setView={setView} user={user} onSignOut={handleSignOut} balances={balances} />
       ) : view === 'exchange' ? (
-        <Exchange setView={setView} />
+        <Exchange setView={setView} user={user} balances={balances} />
       ) : view === 'miner' ? (
         <Miner setView={setView} user={user} />
       ) : (
