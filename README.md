@@ -132,3 +132,23 @@ The firstboot.sh script hardens the system via ufw configuration, updates/upgrad
 SSH is configured to allow passwords, meaning one can login with satoshi:satoshi. INSECURE!!!
 Further installation and configuration will be handled remotely (e.g. Ansibel) where this short-lived security hole is removed.
 Note: don't forget to review the logs: `/var/log/*.log`***
+
+## Server-Side Nodes: BTC Feeder & AZC Seeder
+
+The two install scripts, `bitcoin-feeder-install.sh` and `azcoin-seeder-install.sh` are **not** for regular SC Nodes.
+They are used on dedicated powerful servers to support the large number of SC Nodes.
+
+### Bitcoin Feeder Nodes
+- Full archival Bitcoin node (not pruned)
+- Helps pruned SC Nodes with IBD
+- Acts as a strong "giver" to offset the many outbound-only "taker" SC Nodes
+- Recommended ratio: **1 feeder per 1000 SC Nodes**
+
+### AZCoin Seeder Nodes
+- Acts as bootstrap/seeder node for the AZCoin network
+- They use round-robin DNS and BGP routing protocol
+- Address: azcoin-seed.satoshiware.org
+- Recommended ratio: **1 feeder per 500 SC Nodes**
+
+**Hardware Requirements (both):**
+Fast CPU, fast NVMe SSD, 32 GB+ RAM recommended, and strong network upload bandwidth (biggest bottleneck).
