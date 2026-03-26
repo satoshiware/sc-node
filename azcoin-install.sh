@@ -2,18 +2,65 @@
 set -euo pipefail
 
 # =============================================================================
-# SC Node - AZCoin Core Installation Script (Bare Metal)
+# AZCoin Core Configuration: Full Contributing Node for SC Node
+# =============================================================================
+# Purpose: Provides the AZCoin wallet for SC Node
 #
-# Script Testing Prerequisites: Make sure azcoin .tar.gz is available
-#   apt update && sudo apt full-upgrade -y && sudo apt autoremove -y && sudo apt autoclean
-#   apt install -y curl python3 python-is-python3 # In WSL, Python is not installed by default (required for rpcauth.py script)
-#   VERSION=0.1.2
-#   curl -OL https://github.com/satoshiware/azcoin/releases/download/${VERSION}/azcoin_azcoin-x86_64-linux-gnu.tar.gz
+# Key Characteristics:
+#   • Full node (not pruned) → helps other nodes with block propagation and IBD
+#   • Accepts inbound connections (listening node)
+#   • Fully validates every block and transaction
+#   • Relays blocks and transactions to the AZCoin network
+#
+# Philosophy:
+#   The AZCoin network is still relatively small and needs more full nodes.
+#   Every SC Node therefore runs a complete, cooperating AZCoin node.
+#
+# Inbound Connections & Central Routing:
+#   When many SC Nodes share a limited number of public IP addresses as inbound
+#   connections are routed through centralized servers, the following two settings
+#   must be correctly in configured (azcoin.conf) for this node to be reachable by
+#   other AZCoin peers:
+#
+#      externalip=   → The central infrastructure's public IP or VPN exit IP
+#
+#      port=         → The unique P2P listening port assigned to this specific SC Node.
+#                      When multiple nodes share the same public IP, each must use
+#                      a different port.
+#
+#   These settings allow the central infrastructure to properly forward incoming
+#   connections to this node. If they are incorrect, this node will not receive
+#   any inbound connections.
+#
+# Seeder / Trusted Nodes:
+#   Unlike Bitcoin, AZCoin has no built-in DNS seed nodes. A fresh AZCoin node
+#   will remain isolated and unable to find peers unless it is given at least one
+#   reliable node to connect to via the addnode= parameter in azcoin.conf.
+#
+#   Organizations or entities deploying AZCoin nodes will need to provide dedicated
+#   "seeder nodes" with good uptime and connectivity. These seeder nodes serve as
+#   bootstrap points so new SC Nodes can connect and then gossip to discover the rest
+#   of the network.
+#
+#   This install script will point the AZCoin node to azcoin-seed.satoshiware.org,
+#   which uses round-robin DNS and the Internet's BGP routing protocol to
+#   distribute load across multiple backend seeder nodes.
+#
+# Recommended ratio: One dedicated seeder node for every 500 SC Nodes.
+#   Start with 1:500 and adjust based on sync performance and network load.
+#
+# The companion seeder node installation script is located at:
+#   sc-node/azcoin-seeder-install.sh
+#
+# Important Note for Seeder Nodes:
+#   Be sure to configure each seeder node to connect with several other prominent
+#   and well-established AZCoin nodes using the addnode= parameter in azcoin.conf to
+#   help ensure all nodes remain well-connected.
 # =============================================================================
 
-LOG_FILE="/var/log/setup-azcoin.log"
+LOG_FILE="/var/log/azcoin-install.log"
 log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') [azcoin-install] $*" | tee -a "$LOG_FILE"
+    echo "$*" | tee -a "$LOG_FILE"
 }
 
 # Installation source (tar.gz - used only during install phase)
@@ -27,36 +74,97 @@ RPC_PASSWORD_FILE="${RPC_PASSWORD_DIR}/rpcpassword"
 README_DIR="/usr/local/share/doc"
 README_FILE="${README_DIR}/azcoin.txt"
 
+log "Starting AZCoin Core setup: $(date)"
 # ===================== CHECKS =====================
 if [[ $EUID -ne 0 ]]; then
     log "Error: Must run as root (sudo)."
     exit 1
 fi
 
-# Check that 'python' command exists and points to python3
+# Checking for 'python' command (required for rpcauth.py)
 if ! command -v python >/dev/null 2>&1; then
-    echo -e "Error! 'python' command not found"
-    echo "   You need 'python' to point to python3 (common for rpcauth.py and many scripts)"
-    echo "   Run: apt install -y python-is-python3"
-    exit 1
+    log "'python' command not found. Installing python-is-python3..."
+    apt-get update -qq
+    apt-get install -y python-is-python3
+    if ! command -v python >/dev/null 2>&1; then
+        log "ERROR: Failed to install python-is-python3. Cannot continue."
+        exit 1
+    fi
+    log "'python' command successfully installed and linked to Python 3."
 elif ! python --version 2>&1 | grep -q "Python 3"; then
-    echo -e "Error! 'python' command exists but is not Python 3"
-    python --version
-    echo "   You need Python 3 (rpcauth.py requires it)"
-    exit 1
+    log "Warning: 'python' command exists but is not Python 3. Installing python-is-python3..."
+    apt-get update -qq
+    apt-get install -y python-is-python3
+    if ! python --version 2>&1 | grep -q "Python 3"; then
+        log "ERROR: Still cannot get Python 3 via 'python' command."
+        exit 1
+    fi
+    log "'python' now correctly points to Python 3."
 else
-    echo -e "'python' command points to Python 3"
+    log "'python' command points to Python 3. Good!"
 fi
 
-log "Starting AZCoin Core setup..."
+# ===================== TAR FILE CHECK & AUTO-DOWNLOAD LATEST =====================
+log "Looking for AZCoin tarball in ${AZCOIN_BIN_PARENT}..."
 
-# Find the first azcoin*.tar.gz
-TAR_FILE=$(find "${AZCOIN_BIN_PARENT}" -maxdepth 1 -type f -name 'azcoin*.tar.gz' -print -quit)
+TAR_FILE=$(find "${AZCOIN_BIN_PARENT}" -maxdepth 1 -type f -name 'azcoin-*-linux-gnu.tar.gz' -print -quit)
 if [[ -z "${TAR_FILE}" ]]; then
-    log "Error: No azcoin*.tar.gz found in ${AZCOIN_BIN_PARENT}"
-    exit 1
+    log "No local tarball found. Auto-detecting CPU architecture and downloading latest versioned AZCoin release (skipping 'Latest' meta-tag)..."
+
+    # Create directory if it doesn't exist
+    mkdir -p "${AZCOIN_BIN_PARENT}"
+    cd "${AZCOIN_BIN_PARENT}"
+
+    # Detect architecture
+    case $(uname -m) in
+        x86_64)
+            ARCH_SUFFIX="x86_64-linux-gnu"
+            ;;
+        aarch64|arm64)
+            ARCH_SUFFIX="aarch64-linux-gnu"
+            ;;
+        riscv64)
+            ARCH_SUFFIX="riscv64-linux-gnu"
+            ;;
+        *)
+            log "ERROR: Unsupported CPU architecture: $(uname -m)"
+            log "Supported architectures: x86_64, aarch64/arm64, riscv64"
+            exit 1
+            ;;
+    esac
+
+    # Get all releases and skip the "Latest" meta-tag, take the first real versioned one
+    log "Fetching releases from GitHub and skipping meta-tag 'Latest'..."
+    API_RESPONSE=$(curl -s https://api.github.com/repos/satoshiware/azcoin/releases)
+
+    # Extract the first tag that is NOT exactly "Latest"
+    LATEST_TAG=$(echo "$API_RESPONSE" | grep -o '"tag_name": "[^"]*"' | cut -d '"' -f4 | grep -v '^Latest$' | head -n 1)
+
+    LATEST_VERSION=${LATEST_TAG#v}   # remove leading 'v' if present
+
+    if [[ -z "${LATEST_VERSION}" || "${LATEST_VERSION}" == "null" ]]; then
+        log "ERROR: Could not find any versioned release (only 'Latest' meta-tag found)."
+        exit 1
+    fi
+
+    log "Latest versioned release detected: ${LATEST_TAG} → ${LATEST_VERSION} (${ARCH_SUFFIX})"
+
+    # AZCoin naming pattern (as used in your releases)
+    TAR_NAME="azcoin_azcoin-${LATEST_VERSION}-${ARCH_SUFFIX}.tar.gz"
+    DOWNLOAD_URL="https://github.com/satoshiware/azcoin/releases/download/${LATEST_TAG}/${TAR_NAME}"
+
+    log "Downloading ${TAR_NAME}..."
+    if curl -L --fail --progress-bar -o "${TAR_NAME}" "${DOWNLOAD_URL}"; then
+        TAR_FILE="${AZCOIN_BIN_PARENT}/${TAR_NAME}"
+        log "Download successful: ${TAR_FILE}"
+    else
+        log "ERROR: Download failed for ${DOWNLOAD_URL}"
+        log "Possible causes: asset name mismatch on GitHub or network issue."
+        exit 1
+    fi
+else
+    log "Using existing local tarball: ${TAR_FILE}"
 fi
-log "Using tarball: ${TAR_FILE}"
 
 # ===================== CREATE USER/GROUP =====================
 if ! id "azcoin" &>/dev/null; then
@@ -114,7 +222,7 @@ log "Installed rpcauth.py to /usr/local/bin/ (root:root, 755)"
 # ===================== CONFIG & RPC PASSWORD =====================
 if [[ ! -f /etc/azcoin/azcoin.conf ]]; then
     RPCAUTH_OUTPUT=$(python /usr/local/bin/rpcauth.py satoshi 2>&1) # Run rpcauth.py directly (shebang handles python invocation)
-    RPCAUTH=$(echo "$RPCAUTH_OUTPUT" | grep -o '^rpcauth=satoshi:[0-9a-f]\+\$[0-9a-f]\+') # Extract rpcauth line (starts with rpcauth=)
+    RPCAUTH=$(echo "$RPCAUTH_OUTPUT" | grep -o '^rpcauth=satoshi:.*') # Extract rpcauth line (starts with rpcauth=)
     PASSWORD=$(echo "$RPCAUTH_OUTPUT" | tail -n 1 | tr -d '\r\n \t')
 
     # Safety check — fail if parsing didn't work
@@ -129,7 +237,6 @@ if [[ ! -f /etc/azcoin/azcoin.conf ]]; then
     umask 077 # umask 077 → new files get 0600 (rw-------), dirs 0700 (rwx------)
     echo "${PASSWORD}" > "${RPC_PASSWORD_FILE}"
     umask 02 # Restore standard umask (files 0644, dirs 0755)
-    PASSWORD="CLEARING MEMORY!!!!!!!!!!!!!!!!!!!!!!!"
     chown azcoin:azcoin "${RPC_PASSWORD_FILE}"
     chmod 600 "${RPC_PASSWORD_FILE}"
     log "RPC password saved to ${RPC_PASSWORD_FILE} (600 perms)"
@@ -180,6 +287,10 @@ walletnotify=/usr/local/bin/azcoin_wallet_event_append.sh %s %w
 # assumevalid: default enabled - uses built-in checkpoint
 # Skips sig/script checks on old blocks → 2-5x faster initial sync
 # Still verifies PoW, headers, UTXOs fully
+
+# Limit total upload of old blocks to MiB/day
+# Generous amount, but prevents abuse
+maxuploadtarget=5000
 
 # ZMQ: publish new block hash locally (for real-time monitoring)
 zmqpubhashblock=tcp://127.0.0.1:29334

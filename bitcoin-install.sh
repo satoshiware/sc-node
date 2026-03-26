@@ -2,18 +2,35 @@
 set -euo pipefail
 
 # =============================================================================
-# SC Node - Bitcoin Core Installation Script (Bare Metal)
+# Bitcoin Core Configuration: Pruned, Outbound-Only, and a Silent Contributor
+# =============================================================================
+# Purpose: Provides the BTC wallet for the SC Node
 #
-# Script Testing Prerequisites: Make sure Bitcoin .tar.gz is available
-#   apt update && sudo apt full-upgrade -y && sudo apt autoremove -y && sudo apt autoclean
-#   apt install -y curl python3 python-is-python3 # In WSL, Python is not installed by default (required for rpcauth.py script)
-#   VERSION=30.2
-#   curl -O https://bitcoincore.org/bin/bitcoin-core-${VERSION}/bitcoin-${VERSION}-x86_64-linux-gnu.tar.gz
+# Key Characteristics:
+#   • Pruned mode → low disk usage, fast deployment
+#   • Outbound-only (listen=0 + discover=0) → zero inbound connections
+#   • Fully validates every block and transaction
+#   • Relays new blocks and transactions to the network
+#
+# Compensation Strategy:
+#   Because this node is pruned, outbound-only, and silent, it cannot serve
+#   historical blocks to other nodes during their Initial Block Download (IBD).
+#   It is therefore more of a "taker" than a "giver" to the broader network.
+#
+#   Any organization deploying hundreds or thousands of SC Nodes is strongly
+#   encouraged to run additional full archival (non-pruned, listening) Bitcoin
+#   nodes to help offset this. Example ratio: one full archival Bitcoin node
+#   for every 1000 pruned SC Nodes. Use the sc-node/bitcoin-feeder-install.sh
+#   install script to set up one of these nodes with the proper configuration.
+#
+# IBD Acceleration:
+#   See the "IBD Acceleration Settings" at the bottom of the bitcoin.conf section.
+#   Options: blocksonly=1, higher dbcache, and local addnode/connect
 # =============================================================================
 
-LOG_FILE="/var/log/setup-bitcoin.log"
+LOG_FILE="/var/log/bitcoin-install.log"
 log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') [bitcoin-install] $*" | tee -a "$LOG_FILE"
+    echo "$*" | tee -a "$LOG_FILE"
 }
 
 # Installation source (tar.gz - used only during install phase)
@@ -27,36 +44,92 @@ RPC_PASSWORD_FILE="${RPC_PASSWORD_DIR}/rpcpassword"
 README_DIR="/usr/local/share/doc"
 README_FILE="${README_DIR}/bitcoin.txt"
 
+log "Starting Bitcoin Core setup: $(date)"
 # ===================== CHECKS =====================
 if [[ $EUID -ne 0 ]]; then
     log "Error: Must run as root (sudo)."
     exit 1
 fi
 
-# Check that 'python' command exists and points to python3
+# Checking for 'python' command (required for rpcauth.py)
 if ! command -v python >/dev/null 2>&1; then
-    echo -e "Error! 'python' command not found"
-    echo "   You need 'python' to point to python3 (common for rpcauth.py and many scripts)"
-    echo "   Run: apt install -y python-is-python3"
-    exit 1
+    log "'python' command not found. Installing python-is-python3..."
+    apt-get update -qq
+    apt-get install -y python-is-python3
+    if ! command -v python >/dev/null 2>&1; then
+        log "ERROR: Failed to install python-is-python3. Cannot continue."
+        exit 1
+    fi
+    log "'python' command successfully installed and linked to Python 3."
 elif ! python --version 2>&1 | grep -q "Python 3"; then
-    echo -e "Error! 'python' command exists but is not Python 3"
-    python --version
-    echo "   You need Python 3 (rpcauth.py requires it)"
-    exit 1
+    log "Warning: 'python' command exists but is not Python 3. Installing python-is-python3..."
+    apt-get update -qq
+    apt-get install -y python-is-python3
+    if ! python --version 2>&1 | grep -q "Python 3"; then
+        log "ERROR: Still cannot get Python 3 via 'python' command."
+        exit 1
+    fi
+    log "'python' now correctly points to Python 3."
 else
-    echo -e "'python' command points to Python 3"
+    log "'python' command points to Python 3. Good!"
 fi
 
-log "Starting Bitcoin Core setup..."
+# ===================== TAR FILE CHECK & AUTO-DOWNLOAD LATEST =====================
+log "Looking for Bitcoin Core tarball in ${BITCOIN_BIN_PARENT}..."
 
-# Find the first bitcoin*.tar.gz
-TAR_FILE=$(find "${BITCOIN_BIN_PARENT}" -maxdepth 1 -type f -name 'bitcoin*.tar.gz' -print -quit)
+TAR_FILE=$(find "${BITCOIN_BIN_PARENT}" -maxdepth 1 -type f -name 'bitcoin-*-linux-gnu.tar.gz' -print -quit)
 if [[ -z "${TAR_FILE}" ]]; then
-    log "Error: No bitcoin*.tar.gz found in ${BITCOIN_BIN_PARENT}"
-    exit 1
+    log "No local tarball found. Auto-detecting CPU architecture and downloading latest Bitcoin Core..."
+
+    # Create directory if it doesn't exist
+    mkdir -p "${BITCOIN_BIN_PARENT}"
+    cd "${BITCOIN_BIN_PARENT}"
+
+    # Detect architecture (x86_64, aarch64, and riscv64)
+    case $(uname -m) in
+        x86_64)
+            ARCH_SUFFIX="x86_64-linux-gnu"
+            ;;
+        aarch64|arm64)
+            ARCH_SUFFIX="aarch64-linux-gnu"
+            ;;
+        riscv64)
+            ARCH_SUFFIX="riscv64-linux-gnu"
+            ;;
+        *)
+            log "ERROR: Unsupported CPU architecture: $(uname -m)"
+            log "Supported architectures: x86_64, aarch64/arm64, riscv64"
+            exit 1
+            ;;
+    esac
+
+    # Get latest version from GitHub API (always current, no hard-coded version)
+    log "Fetching latest version from GitHub..."
+    LATEST_TAG=$(curl -s https://api.github.com/repos/bitcoin/bitcoin/releases/latest | grep '"tag_name":' | cut -d '"' -f4)
+    LATEST_VERSION=${LATEST_TAG#v}   # remove leading 'v' if present
+
+    if [[ -z "${LATEST_VERSION}" ]]; then
+        log "ERROR: Could not determine latest Bitcoin Core version."
+        exit 1
+    fi
+
+    log "Latest version detected: ${LATEST_VERSION} (${ARCH_SUFFIX})"
+
+    TAR_NAME="bitcoin-${LATEST_VERSION}-${ARCH_SUFFIX}.tar.gz"
+    DOWNLOAD_URL="https://bitcoincore.org/bin/bitcoin-core-${LATEST_VERSION}/${TAR_NAME}"
+
+    log "Downloading ${TAR_NAME}..."
+    if curl -L --fail --progress-bar -o "${TAR_NAME}" "${DOWNLOAD_URL}"; then
+        TAR_FILE="${BITCOIN_BIN_PARENT}/${TAR_NAME}"
+        log "Download successful: ${TAR_FILE}"
+    else
+        log "ERROR: Download failed for ${DOWNLOAD_URL}"
+        log "Check internet connection or if the architecture is supported."
+        exit 1
+    fi
+else
+    log "Using existing local tarball: ${TAR_FILE}"
 fi
-log "Using tarball: ${TAR_FILE}"
 
 # ===================== CREATE USER/GROUP =====================
 if ! id "bitcoin" &>/dev/null; then
@@ -114,7 +187,7 @@ log "Installed rpcauth.py to /usr/local/bin/ (root:root, 755)"
 # ===================== CONFIG & RPC PASSWORD =====================
 if [[ ! -f /etc/bitcoin/bitcoin.conf ]]; then
     RPCAUTH_OUTPUT=$(python /usr/local/bin/rpcauth.py satoshi 2>&1) # Run rpcauth.py directly (shebang handles python invocation)
-    RPCAUTH=$(echo "$RPCAUTH_OUTPUT" | grep -o '^rpcauth=satoshi:[0-9a-f]\+\$[0-9a-f]\+') # Extract rpcauth line (starts with rpcauth=)
+    RPCAUTH=$(echo "$RPCAUTH_OUTPUT" | grep -o '^rpcauth=satoshi:.*') # Extract rpcauth line (starts with rpcauth=)
     PASSWORD=$(echo "$RPCAUTH_OUTPUT" | tail -n 1 | tr -d '\r\n \t')
 
     # Safety check — fail if parsing didn't work
@@ -129,7 +202,6 @@ if [[ ! -f /etc/bitcoin/bitcoin.conf ]]; then
     umask 077 # umask 077 → new files get 0600 (rw-------), dirs 0700 (rwx------)
     echo "${PASSWORD}" > "${RPC_PASSWORD_FILE}"
     umask 02 # Restore standard umask (files 0644, dirs 0755)
-    PASSWORD="CLEARING MEMORY!!!!!!!!!!!!!!!!!!!!!!!"
     chown bitcoin:bitcoin "${RPC_PASSWORD_FILE}"
     chmod 600 "${RPC_PASSWORD_FILE}"
     log "RPC password saved to ${RPC_PASSWORD_FILE} (600 perms)"
@@ -179,12 +251,38 @@ prune=131072
 # Minimizes bandwidth (~20-50 GB/mo outbound), no public port needed
 listen=0
 
+# Do not advertise our IP address
+# Makes the node invisible to node crawlers and the broader network
+discover=0
+
+# Limit total upload of old blocks to MiB/day
+# Generous amount, but prevents abuse
+maxuploadtarget=5000
+
 # ZMQ: publish new block hash locally (for real-time monitoring)
 zmqpubhashblock=tcp://127.0.0.1:28332
 
 # UTXO cache: 4 GB for faster sync/validation
 # Safe on 32+ GB RAM hosts; prevents OOM/swap
 dbcache=4096
+
+# =============================================================================
+# IBD Acceleration Settings (Uncomment / adjust during initial sync)
+# =============================================================================
+# These settings can dramatically speed up Initial Block Download on new nodes.
+# Uncomment the lines below for the first run. After sync, they can be commented out again.
+
+# Skip most transaction relay during IBD → much faster sync
+# blocksonly=1
+
+# Use more RAM for cache during IBD (Be sure to comment out "dbcache=" setting above)
+# dbcache=8192
+# dbcache=16384
+
+# Connect to Local trusted feeder full nodes (Most effective) on the internal network
+# addnode=10.0.0.50             # Internal IP of your full feeder node #1
+# addnode=10.0.0.51             # Internal IP of your full feeder node #2
+# connect=10.0.0.50             # Optional: force ONLY these peers during early sync
 EOF
 
     chown bitcoin:bitcoin /etc/bitcoin/bitcoin.conf
