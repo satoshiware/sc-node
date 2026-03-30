@@ -12,6 +12,9 @@ import {
   Legend,
 } from 'chart.js'
 
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+const COIN = 'btc'
+
 ChartJS.register(
   CategoryScale,
   LinearScale,
@@ -24,58 +27,189 @@ ChartJS.register(
 
 export default function Miner({ setView, user }) {
   const [showBanner, setShowBanner] = useState(true)
-
   const handleCloseBanner = () => {
     setShowBanner(false)
   }
 
-  const [dailyRewards, setDailyRewards] = useState(null) // null=loading, []=no rewards, array=has rewards
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [lastUpdated, setLastUpdated] = useState(null)
+  const [profile, setProfile] = useState(null)
+  const [poolStats, setPoolStats] = useState(null)
+  const [workerCounts, setWorkerCounts] = useState({
+    active: 0,
+    low: 0,
+    off: 0,
+    dis: 0,
+    lastShare: null,
+  })
+  const [dailyRewards, setDailyRewards] = useState(null)
 
-  // Mock daily rewards (AZC) shaped for the rewards bar chart.
-  // In a real setup, this should be fetched from the backend per account.
-  const mockDailyRewards = useMemo(() => {
-    const start = new Date('2026-02-16T00:00:00Z')
-    const out = []
-    for (let i = 0; i < 30; i++) {
-      const d = new Date(start.getTime() + i * 86400000)
-      const dayLabel = `${String(d.getUTCDate()).padStart(2, '0')}.${String(
-        d.getUTCMonth() + 1
-      ).padStart(2, '0')}`
+  const coinKey = COIN.toLowerCase()
+  const coinLabel = COIN.toUpperCase()
 
-      // Make last ~6 days higher, matching your screenshot look.
-      const isLate = i >= 24
-      const isVeryLate = i >= 28
+  const formatDec = (value, digits = 3) => {
+    const n = Number(value)
+    if (!Number.isFinite(n)) return '0'
+    return n.toLocaleString(undefined, { maximumFractionDigits: digits })
+  }
 
-      const mining = isLate
-        ? isVeryLate
-          ? 0.00000014 + (i - 28) * 0.00000001
-          : 0.00000011 + (i - 24) * 0.00000001
-        : 0.00000002 + i * 0.000000001
+  const toTHs = (value, unit) => {
+    const n = Number(value)
+    if (!Number.isFinite(n)) return 0
 
-      out.push({
-        dayLabel,
-        mining,
-      })
-    }
-    return out
-  }, [])
+    const u = String(unit || '').toLowerCase()
+    if (u.startsWith('th')) return n
+    if (u.startsWith('gh')) return n / 1000
+    if (u.startsWith('mh')) return n / 1_000_000
+    if (u.startsWith('kh')) return n / 1_000_000_000
+    if (u === 'h/s' || u === 'h') return n / 1_000_000_000_000
+    if (u.startsWith('ph')) return n * 1000
+    if (u.startsWith('eh')) return n * 1_000_000
 
-  // Show message for "new to account" users, then show chart if they already visited before.
+    return n
+  }
+
+  const formatReward = (value) => {
+    const n = Number(value)
+    if (!Number.isFinite(n)) return `0.00000000 ${coinLabel}`
+    return `${n.toFixed(8)} ${coinLabel}`
+  }
+
+  const formatLastShare = (ts) => {
+    if (!ts) return '—'
+    const dt = new Date(Number(ts) * 1000)
+    if (Number.isNaN(dt.getTime())) return '—'
+    return dt.toLocaleString()
+  }
+
   useEffect(() => {
-    const key = user?.id != null ? `miner_daily_rewards_seen_${user.id}` : 'miner_daily_rewards_seen_guest'
-    const seen = localStorage.getItem(key)
-    if (seen) {
-      setDailyRewards(mockDailyRewards)
+    if (!user?.token) {
+      setLoading(false)
+      setError('Missing auth token. Please sign in again.')
       return
     }
-    setDailyRewards([])
-    localStorage.setItem(key, '1')
-  }, [mockDailyRewards, user?.id])
 
-  // Mock data for recent hashrate and active workers
-  const labels = ['18:00', '18:10', '18:20', '18:30', '18:40', '18:50', '19:00', '19:10', '19:20']
-  const hashrateValues = [0, 0, 0, 0, 0, 4.2, 5.1, 4.8, 5.0] // TH/s
-  const workerValues = [0, 0, 0, 0, 0, 1, 1, 1, 1] // count
+    let cancelled = false
+
+    const fetchJson = async (endpoint) => {
+      const res = await fetch(`${API_URL}${endpoint}`, {
+        headers: {
+          Authorization: `Bearer ${user.token}`,
+        },
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.detail || `Failed request: ${endpoint}`)
+      }
+      return res.json()
+    }
+
+    const load = async () => {
+      try {
+        setError('')
+        const to = new Date()
+        const from = new Date(to.getTime() - 29 * 24 * 60 * 60 * 1000)
+        const fromIso = from.toISOString().slice(0, 10)
+        const toIso = to.toISOString().slice(0, 10)
+
+        const [profileRes, workersRes, statsRes, rewardsRes] = await Promise.all([
+          fetchJson(`/api/miner/braiins/profile?coin=${coinKey}`),
+          fetchJson(`/api/miner/braiins/workers?coin=${coinKey}`),
+          fetchJson(`/api/miner/braiins/stats?coin=${coinKey}`),
+          fetchJson(`/api/miner/braiins/rewards?coin=${coinKey}&from=${fromIso}&to=${toIso}`),
+        ])
+
+        if (cancelled) return
+
+        const profileData = profileRes?.[coinKey] || profileRes?.[coinLabel] || null
+        const statsData = statsRes?.[coinKey] || statsRes?.[coinLabel] || null
+        const workersMap = workersRes?.[coinKey]?.workers || workersRes?.[coinLabel]?.workers || {}
+        const rewardRows = rewardsRes?.[coinKey]?.daily_rewards || rewardsRes?.[coinLabel]?.daily_rewards || []
+
+        let maxLastShare = null
+        let active = 0
+        let low = 0
+        let off = 0
+        let dis = 0
+
+        Object.values(workersMap).forEach((w) => {
+          const state = String(w?.state || '').toLowerCase()
+          if (state === 'ok') active += 1
+          else if (state === 'low') low += 1
+          else if (state === 'off') off += 1
+          else if (state === 'dis') dis += 1
+
+          const share = Number(w?.last_share)
+          if (Number.isFinite(share) && (!maxLastShare || share > maxLastShare)) {
+            maxLastShare = share
+          }
+        })
+
+        const normalizedRewards = rewardRows
+          .map((r) => {
+            const ts = Number(r?.date)
+            const dt = Number.isFinite(ts) ? new Date(ts * 1000) : null
+            const dayLabel = dt
+              ? `${String(dt.getUTCDate()).padStart(2, '0')}.${String(dt.getUTCMonth() + 1).padStart(2, '0')}`
+              : '—'
+
+            return {
+              date: ts,
+              dayLabel,
+              mining: Number(r?.mining_reward || 0),
+              total: Number(r?.total_reward || 0),
+            }
+          })
+          .sort((a, b) => a.date - b.date)
+
+        setProfile(profileData)
+        setPoolStats(statsData)
+        setWorkerCounts({ active, low, off, dis, lastShare: maxLastShare })
+        setDailyRewards(normalizedRewards)
+        setLastUpdated(new Date())
+      } catch (e) {
+        if (!cancelled) {
+          setError(e?.message || 'Failed to load miner data')
+        }
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+
+    setLoading(true)
+    load()
+    const interval = setInterval(load, 30000)
+
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [coinKey, coinLabel, user?.token])
+
+  const hashrateUnit = profile?.hash_rate_unit || 'Gh/s'
+  const displayHashrateUnit = 'TH/s'
+  const hash5m = toTHs(profile?.hash_rate_5m || 0, hashrateUnit)
+  const hash60m = toTHs(profile?.hash_rate_60m || 0, hashrateUnit)
+  const hash24h = toTHs(profile?.hash_rate_24h || 0, hashrateUnit)
+  const todayReward = Number(profile?.today_reward || 0)
+  const allTimeReward = Number(profile?.all_time_reward || 0)
+  const currentBalance = Number(profile?.current_balance || 0)
+  const yesterdayTotalReward = dailyRewards?.length > 1 ? dailyRewards[dailyRewards.length - 2]?.total || 0 : 0
+
+  const labels = ['-40m', '-35m', '-30m', '-25m', '-20m', '-15m', '-10m', '-5m', 'Now']
+  const hashrateValues = [
+    hash60m * 0.85,
+    hash60m * 0.88,
+    hash60m * 0.9,
+    hash60m * 0.92,
+    hash60m * 0.95,
+    hash60m * 0.97,
+    hash60m,
+    hash5m * 0.98,
+    hash5m,
+  ]
+  const workerValues = labels.map(() => workerCounts.active)
 
   const recentHashrateData = {
     labels,
@@ -117,7 +251,7 @@ export default function Miner({ setView, user }) {
             const label = context.dataset.label || ''
             const value = context.parsed.y
             if (label.includes('Hashrate')) {
-              return `${label}: ${value.toFixed(3)} TH/s`
+              return `${label}: ${Number(value).toFixed(3)} ${displayHashrateUnit}`
             }
             return `${label}: ${value}`
           },
@@ -134,7 +268,7 @@ export default function Miner({ setView, user }) {
         position: 'left',
         ticks: {
           color: '#9CA3AF',
-          callback: (v) => `${v}T`,
+          callback: (v) => `${Number(v).toFixed(2)} ${displayHashrateUnit}`,
         },
         grid: { color: 'rgba(156,163,175,0.12)' },
       },
@@ -188,7 +322,7 @@ export default function Miner({ setView, user }) {
             label(context) {
               const label = context.dataset.label || ''
               const v = Number(context.parsed.y) || 0
-              return `${label}: ${v.toFixed(8)} AZC`
+              return `${label}: ${v.toFixed(8)} ${coinLabel}`
             },
           },
         },
@@ -210,7 +344,7 @@ export default function Miner({ setView, user }) {
         y: {
           ticks: {
             color: '#9CA3AF',
-            callback: (v) => `${Number(v).toFixed(8)} AZC`,
+            callback: (v) => `${Number(v).toFixed(8)} ${coinLabel}`,
           },
           grid: { color: 'rgba(156,163,175,0.15)' },
           // Draw the left axis border to match the reference UI.
@@ -280,9 +414,16 @@ export default function Miner({ setView, user }) {
             <div className="flex flex-wrap items-center justify-between gap-3">
               <h1 className="text-xl sm:text-2xl font-semibold text-white">Dashboard</h1>
               <div className="text-xs sm:text-sm text-gray-400">
-                Last updated <span className="text-gray-200">3 minutes ago</span>
+                Last updated{' '}
+                <span className="text-gray-200">{lastUpdated ? lastUpdated.toLocaleTimeString() : '—'}</span>
               </div>
             </div>
+
+            {error && (
+              <div className="text-xs sm:text-sm text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-3 py-2">
+                {error}
+              </div>
+            )}
 
             {/* Top stats row */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -292,10 +433,10 @@ export default function Miner({ setView, user }) {
                   5 minute Hashrate
                 </div>
                 <div className="text-2xl sm:text-3xl font-semibold text-white">
-                  5.043 <span className="text-base text-gray-400 font-normal">TH/s</span>
+                  {formatDec(hash5m, 3)} <span className="text-base text-gray-400 font-normal">{displayHashrateUnit}</span>
                 </div>
                 <div className="text-xs text-gray-400">
-                  Last share <span className="text-gray-200">3 minutes ago</span>
+                  Last share <span className="text-gray-200">{formatLastShare(workerCounts.lastShare)}</span>
                 </div>
               </div>
 
@@ -307,19 +448,19 @@ export default function Miner({ setView, user }) {
                 <div className="grid grid-cols-2 gap-2 text-xs sm:text-sm">
                   <div className="flex items-center justify-between">
                     <span className="text-gray-300">Active</span>
-                    <span className="text-green-400 font-semibold">1</span>
+                    <span className="text-green-400 font-semibold">{workerCounts.active}</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-gray-300">Inactive</span>
-                    <span className="text-red-400 font-semibold">0</span>
+                    <span className="text-red-400 font-semibold">{workerCounts.off}</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-gray-300">Warning</span>
-                    <span className="text-amber-400 font-semibold">0</span>
+                    <span className="text-amber-400 font-semibold">{workerCounts.low}</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-gray-300">Offline</span>
-                    <span className="text-gray-500 font-semibold">0</span>
+                    <span className="text-gray-500 font-semibold">{workerCounts.dis}</span>
                   </div>
                 </div>
               </div>
@@ -333,13 +474,13 @@ export default function Miner({ setView, user }) {
                   <div>
                     <div className="text-xs text-gray-400 mb-0.5">1 Hour</div>
                     <div className="text-lg sm:text-xl font-semibold text-white">
-                      4.222 <span className="text-xs text-gray-400 font-normal">TH/s</span>
+                      {formatDec(hash60m, 3)} <span className="text-xs text-gray-400 font-normal">{displayHashrateUnit}</span>
                     </div>
                   </div>
                   <div>
                     <div className="text-xs text-gray-400 mb-0.5">24 Hours</div>
                     <div className="text-lg sm:text-xl font-semibold text-white">
-                      175.9 <span className="text-xs text-gray-400 font-normal">GH/s</span>
+                      {formatDec(hash24h, 3)} <span className="text-xs text-gray-400 font-normal">{displayHashrateUnit}</span>
                     </div>
                   </div>
                 </div>
@@ -378,31 +519,31 @@ export default function Miner({ setView, user }) {
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4 text-xs sm:text-sm">
                 <div>
                   <div className="text-gray-400 mb-1">Today's Mining Rewards</div>
-                  <div className="text-lg font-semibold text-white">0.00000007 AZC</div>
+                  <div className="text-lg font-semibold text-white">{formatReward(todayReward)}</div>
                   <div className="text-gray-500 text-xs">≈ $0.00 USD</div>
                 </div>
                 <div>
                   <div className="text-gray-400 mb-1">Yesterday's Total Reward</div>
-                  <div className="text-lg font-semibold text-white">0.00000000 AZC</div>
-                  <div className="text-gray-500 text-xs">Est. Profitability: 0.00000034 AZC</div>
+                  <div className="text-lg font-semibold text-white">{formatReward(yesterdayTotalReward)}</div>
+                  <div className="text-gray-500 text-xs">Updated from Braiins daily rewards</div>
                 </div>
                 <div>
                   <div className="text-gray-400 mb-1">All Time Reward</div>
-                  <div className="text-lg font-semibold text-white">0.00000000 AZC</div>
+                  <div className="text-lg font-semibold text-white">{formatReward(allTimeReward)}</div>
                   <div className="text-gray-500 text-xs">Reward scheme: FPPS (fee 2.5%)</div>
                 </div>
                 <div>
                   <div className="text-gray-400 mb-1">Next Payout ETA</div>
                   <div className="text-lg font-semibold text-white">—</div>
-                  <div className="text-gray-500 text-xs">Account balance: 0.00000000 AZC</div>
+                  <div className="text-gray-500 text-xs">Account balance: {formatReward(currentBalance)}</div>
                 </div>
               </div>
 
-              {dailyRewards == null ? (
+              {loading ? (
                 <div className="mt-2 text-xs sm:text-sm text-gray-400 bg-gray-900/60 border border-dashed border-gray-700 rounded-md px-3 py-3">
                   Loading rewards…
                 </div>
-              ) : dailyRewards.length === 0 ? (
+              ) : !dailyRewards || dailyRewards.length === 0 ? (
                 <div className="mt-2 text-xs sm:text-sm text-gray-400 bg-gray-900/60 border border-dashed border-gray-700 rounded-md px-3 py-3">
                   You have no daily rewards yet. Your rewards for each day will appear here once confirmed and finalized.
                 </div>
@@ -438,15 +579,18 @@ export default function Miner({ setView, user }) {
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs sm:text-sm">
                 <div>
                   <div className="text-gray-400 mb-1">Pool Effective HR (30m avg)</div>
-                  <div className="text-lg font-semibold text-white">13.92 EH/s</div>
+                  <div className="text-lg font-semibold text-white">
+                    {formatDec(toTHs(poolStats?.pool_60m_hash_rate || 0, poolStats?.hash_rate_unit || hashrateUnit), 3)}{' '}
+                    {displayHashrateUnit}
+                  </div>
                 </div>
                 <div>
                   <div className="text-gray-400 mb-1">Active Users</div>
-                  <div className="text-lg font-semibold text-white">12 288</div>
+                  <div className="text-lg font-semibold text-white">{formatDec(poolStats?.pool_active_users || 0, 0)}</div>
                 </div>
                 <div>
                   <div className="text-gray-400 mb-1">Active Workers</div>
-                  <div className="text-lg font-semibold text-white">103 909</div>
+                  <div className="text-lg font-semibold text-white">{formatDec(poolStats?.pool_active_workers || 0, 0)}</div>
                 </div>
               </div>
             </div>

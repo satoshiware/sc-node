@@ -37,3 +37,10 @@ pytest_cache/
 build/
 dist/
 *.egg-info/
+
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm

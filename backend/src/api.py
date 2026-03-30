@@ -1,7 +1,16 @@
-from fastapi import FastAPI, HTTPException, Path, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Path, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
 import asyncio
+import json
+import os
+import ssl
+from urllib import parse, request as urlrequest
+from urllib.error import HTTPError, URLError
+try:
+    import certifi
+except ImportError:
+    certifi = None
 from orders import get_open_orders, get_best_bid, get_best_ask, place_order, get_all_user_orders, get_order_by_id,get_orders_by_user
 from trades import get_all_trades, get_trades_by_user
 from candles import get_historical_candles
@@ -13,6 +22,65 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
 from fastapi import Request
 from auth import hash_password, verify_password, create_jwt, get_current_user, get_user_by_email, create_user
 from wallets import get_wallet, create_wallet, check_balance
+
+BRAIINS_BASE_URL = "https://pool.braiins.com"
+
+
+def build_ssl_context() -> ssl.SSLContext:
+    skip_verify = os.getenv("BRAIINS_SKIP_SSL_VERIFY", "false").lower() in {"1", "true", "yes"}
+    if skip_verify:
+        # Dev-only fallback when local machine trust store is broken.
+        return ssl._create_unverified_context()
+
+    if certifi is not None:
+        return ssl.create_default_context(cafile=certifi.where())
+
+    return ssl.create_default_context()
+
+
+BRAIINS_SSL_CONTEXT = build_ssl_context()
+
+
+def get_braiins_api_key() -> str:
+    # Support both names while keeping BRAIINS_API_KEY as preferred convention.
+    token = os.getenv("BRAIINS_API_KEY") or os.getenv("braiins_api_key")
+    if not token:
+        raise HTTPException(
+            status_code=500,
+            detail="Braiins API key is missing. Set BRAIINS_API_KEY in backend/.env",
+        )
+    return token
+
+
+def braiins_get(path: str, query: dict | None = None) -> dict:
+    token = get_braiins_api_key()
+    url = f"{BRAIINS_BASE_URL}{path}"
+    if query:
+        url = f"{url}?{parse.urlencode(query)}"
+
+    req = urlrequest.Request(
+        url,
+        headers={
+            "Pool-Auth-Token": token,
+            "Accept": "application/json",
+            "User-Agent": "coinbot-backend/1.0",
+        },
+        method="GET",
+    )
+
+    try:
+        with urlrequest.urlopen(req, timeout=10, context=BRAIINS_SSL_CONTEXT) as resp:
+            body = resp.read().decode("utf-8")
+            return json.loads(body)
+    except HTTPError as e:
+        msg = e.read().decode("utf-8", errors="ignore")
+        raise HTTPException(status_code=502, detail=f"Braiins API HTTP {e.code}: {msg[:200]}")
+    except ssl.SSLError as e:
+        raise HTTPException(status_code=502, detail=f"Braiins API SSL error: {str(e)}")
+    except URLError as e:
+        raise HTTPException(status_code=502, detail=f"Braiins API network error: {e.reason}")
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="Braiins API returned invalid JSON")
 
 app = FastAPI()
 
@@ -551,3 +619,39 @@ def get_candles(limit: int = 120):
         return {"candles": get_historical_candles(limit=limit)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── Braiins Miner Endpoints ────────────────────────────────────────────────
+
+@app.get("/api/miner/braiins/profile")
+def braiins_profile(request: Request, coin: str = "btc"):
+    get_current_user(request.headers.get("authorization"))
+    return braiins_get(f"/accounts/profile/json/{coin}/")
+
+
+@app.get("/api/miner/braiins/workers")
+def braiins_workers(request: Request, coin: str = "btc"):
+    get_current_user(request.headers.get("authorization"))
+    return braiins_get(f"/accounts/workers/json/{coin}")
+
+
+@app.get("/api/miner/braiins/stats")
+def braiins_stats(request: Request, coin: str = "btc"):
+    get_current_user(request.headers.get("authorization"))
+    return braiins_get(f"/stats/json/{coin}")
+
+
+@app.get("/api/miner/braiins/rewards")
+def braiins_rewards(
+    request: Request,
+    coin: str = "btc",
+    from_date: str | None = Query(default=None, alias="from"),
+    to_date: str | None = Query(default=None, alias="to"),
+):
+    get_current_user(request.headers.get("authorization"))
+    query = {}
+    if from_date:
+        query["from"] = from_date
+    if to_date:
+        query["to"] = to_date
+    return braiins_get(f"/accounts/rewards/json/{coin}", query=query or None)
