@@ -14,6 +14,7 @@ import {
 } from 'chart.js'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8000'
 const COIN = 'btc'
 
 ChartJS.register(
@@ -37,6 +38,7 @@ export default function Miner({ setView, user }) {
   const [lastUpdated, setLastUpdated] = useState(null)
   const [profile, setProfile] = useState(null)
   const [poolStats, setPoolStats] = useState(null)
+  const [coinUsdPrice, setCoinUsdPrice] = useState(null)
   const [workerCounts, setWorkerCounts] = useState({
     active: 0,
     low: 0,
@@ -45,11 +47,13 @@ export default function Miner({ setView, user }) {
     lastShare: null,
   })
   const [dailyRewards, setDailyRewards] = useState(null)
+  const [recentSeries, setRecentSeries] = useState([])
   const [workersList, setWorkersList] = useState([])
   const [minerTab, setMinerTab] = useState('mining') // 'mining' | 'workers'
 
   const coinKey = COIN.toLowerCase()
   const coinLabel = COIN.toUpperCase()
+  const coinGeckoId = coinKey === 'btc' ? 'bitcoin' : null
 
   const formatDec = (value, digits = 3) => {
     const n = Number(value)
@@ -62,13 +66,13 @@ export default function Miner({ setView, user }) {
     if (!Number.isFinite(n)) return 0
 
     const u = String(unit || '').toLowerCase()
+    if (u.startsWith('eh')) return n * 1_000_000
+    if (u.startsWith('ph')) return n * 1000
     if (u.startsWith('th')) return n
     if (u.startsWith('gh')) return n / 1000
     if (u.startsWith('mh')) return n / 1_000_000
     if (u.startsWith('kh')) return n / 1_000_000_000
-    if (u === 'h/s' || u === 'h') return n / 1_000_000_000_000
-    if (u.startsWith('ph')) return n * 1000
-    if (u.startsWith('eh')) return n * 1_000_000
+    if (u === 'h/s' || u === 'h' || u.startsWith('hs')) return n / 1_000_000_000_000
 
     return n
   }
@@ -108,27 +112,33 @@ export default function Miner({ setView, user }) {
       return res.json()
     }
 
-    const load = async () => {
+    const fetchMinerJson = async (newEndpoint, legacyEndpoint) => {
       try {
-        setError('')
-        const to = new Date()
-        const from = new Date(to.getTime() - 29 * 24 * 60 * 60 * 1000)
-        const fromIso = from.toISOString().slice(0, 10)
-        const toIso = to.toISOString().slice(0, 10)
+        return await fetchJson(newEndpoint)
+      } catch (e) {
+        if (String(e?.message || '').includes('404') && legacyEndpoint) {
+          return fetchJson(legacyEndpoint)
+        }
+        throw e
+      }
+    }
 
-        const [profileRes, workersRes, statsRes, rewardsRes] = await Promise.all([
-          fetchJson(`/api/miner/braiins/profile?coin=${coinKey}`),
-          fetchJson(`/api/miner/braiins/workers?coin=${coinKey}`),
-          fetchJson(`/api/miner/braiins/stats?coin=${coinKey}`),
-          fetchJson(`/api/miner/braiins/rewards?coin=${coinKey}&from=${fromIso}&to=${toIso}`),
-        ])
+    const fetchUsdRate = async () => {
+      if (!coinGeckoId) return null
+      const res = await fetch(
+        `https://api.coingecko.com/api/v3/simple/price?ids=${coinGeckoId}&vs_currencies=usd`
+      )
+      if (!res.ok) return null
+      const data = await res.json().catch(() => null)
+      const usd = Number(data?.[coinGeckoId]?.usd)
+      return Number.isFinite(usd) ? usd : null
+    }
 
-        if (cancelled) return
-
-        const profileData = profileRes?.[coinKey] || profileRes?.[coinLabel] || null
-        const statsData = statsRes?.[coinKey] || statsRes?.[coinLabel] || null
-        const workersMap = workersRes?.[coinKey]?.workers || workersRes?.[coinLabel]?.workers || {}
-        const rewardRows = rewardsRes?.[coinKey]?.daily_rewards || rewardsRes?.[coinLabel]?.daily_rewards || []
+    const applyMinerPayload = (profileRes, workersRes, statsRes, rewardsRes, usdRate) => {
+      const profileData = profileRes?.[coinKey] || profileRes?.[coinLabel] || null
+      const statsData = statsRes?.[coinKey] || statsRes?.[coinLabel] || null
+      const workersMap = workersRes?.[coinKey]?.workers || workersRes?.[coinLabel]?.workers || {}
+      const rewardRows = rewardsRes?.[coinKey]?.daily_rewards || rewardsRes?.[coinLabel]?.daily_rewards || []
 
         let maxLastShare = null
         let active = 0
@@ -138,12 +148,12 @@ export default function Miner({ setView, user }) {
 
         const unitForWorkers = profileData?.hash_rate_unit || 'Gh/s'
 
-        Object.values(workersMap).forEach((w) => {
-          const state = String(w?.state || '').toLowerCase()
-          if (state === 'ok') active += 1
-          else if (state === 'low') low += 1
-          else if (state === 'off') off += 1
-          else if (state === 'dis') dis += 1
+      Object.values(workersMap).forEach((w) => {
+        const state = String(w?.state || '').toLowerCase()
+        if (state === 'ok') active += 1
+        else if (state === 'low') low += 1
+        else if (state === 'off') off += 1
+        else if (state === 'dis') dis += 1
 
           const share = Number(w?.last_share)
           if (Number.isFinite(share) && (!maxLastShare || share > maxLastShare)) {
@@ -168,29 +178,69 @@ export default function Miner({ setView, user }) {
           }
         })
 
-        const normalizedRewards = rewardRows
-          .map((r) => {
-            const ts = Number(r?.date)
-            const dt = Number.isFinite(ts) ? new Date(ts * 1000) : null
-            const dayLabel = dt
-              ? `${String(dt.getUTCDate()).padStart(2, '0')}.${String(dt.getUTCMonth() + 1).padStart(2, '0')}`
-              : '—'
+      const normalizedRewards = rewardRows
+        .map((r) => {
+          const ts = Number(r?.date)
+          const dt = Number.isFinite(ts) ? new Date(ts * 1000) : null
+          const dayLabel = dt
+            ? `${String(dt.getUTCDate()).padStart(2, '0')}.${String(dt.getUTCMonth() + 1).padStart(2, '0')}`
+            : '—'
 
-            return {
-              date: ts,
-              dayLabel,
-              mining: Number(r?.mining_reward || 0),
-              total: Number(r?.total_reward || 0),
-            }
-          })
-          .sort((a, b) => a.date - b.date)
+          return {
+            date: ts,
+            dayLabel,
+            mining: Number(r?.mining_reward || 0),
+            total: Number(r?.total_reward || 0),
+          }
+        })
+        .sort((a, b) => a.date - b.date)
 
-        setProfile(profileData)
-        setPoolStats(statsData)
-        setWorkerCounts({ active, low, off, dis, lastShare: maxLastShare })
-        setDailyRewards(normalizedRewards)
-        setWorkersList(workerRows)
-        setLastUpdated(new Date())
+      setProfile(profileData)
+      setPoolStats(statsData)
+      if (Number.isFinite(usdRate)) {
+        setCoinUsdPrice(usdRate)
+      }
+      setWorkerCounts({ active, low, off, dis, lastShare: maxLastShare })
+      setDailyRewards(normalizedRewards)
+      setLastUpdated(new Date())
+
+      const sampleHashrateUnit = profileData?.hash_rate_unit || 'h/s'
+      const sampleHash5m = toTHs(profileData?.hash_rate_5m || 0, sampleHashrateUnit)
+      const sample = {
+        ts: Date.now(),
+        hashrate: sampleHash5m,
+        activeWorkers: active,
+      }
+      setRecentSeries((prev) => {
+        const next = [...prev, sample]
+        if (next.length > 40) {
+          return next.slice(next.length - 40)
+        }
+        return next
+      })
+    }
+
+    const load = async () => {
+      try {
+        setError('')
+        const to = new Date()
+        const from = new Date(to.getTime() - 29 * 24 * 60 * 60 * 1000)
+        const fromIso = from.toISOString().slice(0, 10)
+        const toIso = to.toISOString().slice(0, 10)
+
+        const [profileRes, workersRes, statsRes, rewardsRes, usdRate] = await Promise.all([
+          fetchMinerJson(`/api/miner/profile?coin=${coinKey}`, `/api/miner/braiins/profile?coin=${coinKey}`),
+          fetchMinerJson(`/api/miner/workers?coin=${coinKey}`, `/api/miner/braiins/workers?coin=${coinKey}`),
+          fetchMinerJson(`/api/miner/stats?coin=${coinKey}`, `/api/miner/braiins/stats?coin=${coinKey}`),
+          fetchMinerJson(
+            `/api/miner/rewards?coin=${coinKey}&from=${fromIso}&to=${toIso}`,
+            `/api/miner/braiins/rewards?coin=${coinKey}&from=${fromIso}&to=${toIso}`
+          ),
+          fetchUsdRate(),
+        ])
+
+        if (cancelled) return
+        applyMinerPayload(profileRes, workersRes, statsRes, rewardsRes, usdRate)
       } catch (e) {
         if (!cancelled) {
           setError(e?.message || 'Failed to load miner data')
@@ -201,15 +251,72 @@ export default function Miner({ setView, user }) {
       }
     }
 
+    let ws
+    let reconnectTimer
+    let wsFailureCount = 0
+    let wsConnectedOnce = false
+    const connectMinerWebSocket = () => {
+      if (wsFailureCount >= 3) {
+        return
+      }
+
+      const url = `${WS_URL}/ws/miner?coin=${encodeURIComponent(coinKey)}&token=${encodeURIComponent(user.token)}`
+      ws = new WebSocket(url)
+
+      ws.onopen = () => {
+        wsFailureCount = 0
+        wsConnectedOnce = true
+      }
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data)
+          if (msg?.type === 'miner_update') {
+            applyMinerPayload(msg.profile, msg.workers, msg.stats, msg.rewards, null)
+            if (msg.updated_at) {
+              const dt = new Date(msg.updated_at)
+              if (!Number.isNaN(dt.getTime())) {
+                setLastUpdated(dt)
+              }
+            }
+          } else if (msg?.type === 'error') {
+            setError(msg.detail || 'Miner websocket error')
+          }
+        } catch {
+          // Ignore malformed websocket payloads and keep stream alive.
+        }
+      }
+
+      ws.onerror = () => {
+        wsFailureCount += 1
+      }
+
+      ws.onclose = () => {
+        if (!cancelled) {
+          if (!wsConnectedOnce) {
+            wsFailureCount += 1
+          }
+          if (wsFailureCount >= 3) {
+            setError((prev) => prev || 'Live miner updates unavailable; using periodic refresh.')
+            return
+          }
+          reconnectTimer = setTimeout(connectMinerWebSocket, 2000)
+        }
+      }
+    }
+
     setLoading(true)
     load()
+    connectMinerWebSocket()
     const interval = setInterval(load, 30000)
 
     return () => {
       cancelled = true
+      if (reconnectTimer) clearTimeout(reconnectTimer)
+      if (ws) ws.close()
       clearInterval(interval)
     }
-  }, [coinKey, coinLabel, user?.token])
+  }, [coinGeckoId, coinKey, coinLabel, user?.token])
 
   const hashrateUnit = profile?.hash_rate_unit || 'Gh/s'
   const displayHashrateUnit = 'TH/s'
@@ -217,23 +324,29 @@ export default function Miner({ setView, user }) {
   const hash60m = toTHs(profile?.hash_rate_60m || 0, hashrateUnit)
   const hash24h = toTHs(profile?.hash_rate_24h || 0, hashrateUnit)
   const todayReward = Number(profile?.today_reward || 0)
+  const todayRewardUsd = Number.isFinite(coinUsdPrice) ? todayReward * coinUsdPrice : null
   const allTimeReward = Number(profile?.all_time_reward || 0)
   const currentBalance = Number(profile?.current_balance || 0)
   const yesterdayTotalReward = dailyRewards?.length > 1 ? dailyRewards[dailyRewards.length - 2]?.total || 0 : 0
 
-  const labels = ['-40m', '-35m', '-30m', '-25m', '-20m', '-15m', '-10m', '-5m', 'Now']
-  const hashrateValues = [
-    hash60m * 0.85,
-    hash60m * 0.88,
-    hash60m * 0.9,
-    hash60m * 0.92,
-    hash60m * 0.95,
-    hash60m * 0.97,
-    hash60m,
-    hash5m * 0.98,
-    hash5m,
-  ]
-  const workerValues = labels.map(() => workerCounts.active)
+  const recentChartSamples = useMemo(() => {
+    if (!recentSeries.length) {
+      return [
+        {
+          ts: Date.now(),
+          hashrate: hash5m,
+          activeWorkers: workerCounts.active,
+        },
+      ]
+    }
+    return recentSeries.slice(-12)
+  }, [hash5m, recentSeries, workerCounts.active])
+
+  const labels = recentChartSamples.map((p) =>
+    new Date(p.ts).toLocaleTimeString([], { minute: '2-digit', second: '2-digit' })
+  )
+  const hashrateValues = recentChartSamples.map((p) => p.hashrate)
+  const workerValues = recentChartSamples.map((p) => p.activeWorkers)
 
   const recentHashrateData = {
     labels,
@@ -579,12 +692,21 @@ export default function Miner({ setView, user }) {
                 <div>
                   <div className="text-gray-400 mb-1">Today's Mining Rewards</div>
                   <div className="text-lg font-semibold text-white">{formatReward(todayReward)}</div>
-                  <div className="text-gray-500 text-xs">≈ $0.00 USD</div>
+                  <div className="text-gray-500 text-xs">
+                    {todayRewardUsd === null
+                      ? '≈ — USD'
+                      : `≈ ${todayRewardUsd.toLocaleString(undefined, {
+                          style: 'currency',
+                          currency: 'USD',
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })} USD`}
+                  </div>
                 </div>
                 <div>
                   <div className="text-gray-400 mb-1">Yesterday's Total Reward</div>
                   <div className="text-lg font-semibold text-white">{formatReward(yesterdayTotalReward)}</div>
-                  <div className="text-gray-500 text-xs">Updated from Braiins daily rewards</div>
+                  <div className="text-gray-500 text-xs">Updated from local pool daily rewards</div>
                 </div>
                 <div>
                   <div className="text-gray-400 mb-1">All Time Reward</div>
@@ -648,7 +770,7 @@ export default function Miner({ setView, user }) {
                   <div className="text-lg font-semibold text-white">{formatDec(poolStats?.pool_active_users || 0, 0)}</div>
                 </div>
                 <div>
-                  <div className="text-gray-400 mb-1">Active Workers</div>
+                  <div className="text-gray-400 mb-1">Total Workers</div>
                   <div className="text-lg font-semibold text-white">{formatDec(poolStats?.pool_active_workers || 0, 0)}</div>
                 </div>
               </div>

@@ -282,10 +282,12 @@ export default function LeftChart({ priceGap = 1 }) {
       x: {
         type: 'time',
         time: {
-          unit: 'second',
+          minUnit: 'minute',
           displayFormats: {
             second: 'h:mm:ss a',       // ← 2:32:10 PM
             minute: 'h:mm a',          // ← 2:32 PM
+            hour: 'h:mm a',
+            day: 'dd MMM',
           },
           tooltipFormat: 'dd MMM h:mm:ss a',   // ← 09 Mar 2:32:10 PM
         },
@@ -314,10 +316,12 @@ export default function LeftChart({ priceGap = 1 }) {
       x: {
         type: 'time',
         time: {
-          unit: 'second',
+          minUnit: 'minute',
           displayFormats: {
             second: 'h:mm:ss a',       // ← 2:32:10 PM
             minute: 'h:mm a',          // ← 2:32 PM
+            hour: 'h:mm a',
+            day: 'dd MMM',
           },
           tooltipFormat: 'dd MMM h:mm:ss a',   // ← 09 Mar 2:32:10 PM
         },

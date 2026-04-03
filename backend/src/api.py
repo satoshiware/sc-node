@@ -24,6 +24,8 @@ from auth import hash_password, verify_password, create_jwt, get_current_user, g
 from wallets import get_wallet, create_wallet, check_balance
 
 BRAIINS_BASE_URL = "https://pool.braiins.com"
+MINER_PROVIDER = os.getenv("MINER_PROVIDER", "local").strip().lower()
+LOCAL_POOL_BASE_URL = os.getenv("LOCAL_POOL_BASE_URL", "http://10.10.80.10:8000").rstrip("/")
 
 
 def build_ssl_context() -> ssl.SSLContext:
@@ -81,6 +83,223 @@ def braiins_get(path: str, query: dict | None = None) -> dict:
         raise HTTPException(status_code=502, detail=f"Braiins API network error: {e.reason}")
     except json.JSONDecodeError:
         raise HTTPException(status_code=502, detail="Braiins API returned invalid JSON")
+
+
+def get_local_pool_token() -> str:
+    token = os.getenv("LOCAL_POOL_BEARER_TOKEN") or os.getenv("local_pool_bearer_token")
+    if not token:
+        raise HTTPException(
+            status_code=500,
+            detail="Local pool bearer token is missing. Set LOCAL_POOL_BEARER_TOKEN in backend/.env",
+        )
+    return token
+
+
+def local_pool_get(path: str, query: dict | None = None) -> dict | list:
+    token = get_local_pool_token()
+    url = f"{LOCAL_POOL_BASE_URL}{path}"
+    if query:
+        url = f"{url}?{parse.urlencode(query)}"
+
+    req = urlrequest.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "User-Agent": "coinbot-backend/1.0",
+        },
+        method="GET",
+    )
+
+    try:
+        with urlrequest.urlopen(req, timeout=10) as resp:
+            body = resp.read().decode("utf-8")
+            return json.loads(body)
+    except HTTPError as e:
+        msg = e.read().decode("utf-8", errors="ignore")
+        raise HTTPException(status_code=502, detail=f"Local pool API HTTP {e.code}: {msg[:200]}")
+    except URLError as e:
+        raise HTTPException(status_code=502, detail=f"Local pool API network error: {e.reason}")
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="Local pool API returned invalid JSON")
+
+
+def resolve_pool_username(user: dict | None, requested_username: str | None = None) -> str | None:
+    if requested_username:
+        value = requested_username.strip()
+        return value or None
+    if isinstance(user, dict):
+        # Login identity is the primary source for pool username.
+        candidate = user.get("name") or user.get("username") or user.get("email")
+        if candidate:
+            candidate = str(candidate)
+            if "@" in candidate:
+                return candidate.split("@", 1)[0]
+            return candidate
+    return None
+
+
+def map_worker_state(seconds_since_last_share: float | int | None) -> str:
+    s = to_number(seconds_since_last_share)
+    if s is None:
+        return "off"
+    if s <= 90:
+        return "ok"
+    if s <= 300:
+        return "low"
+    if s <= 1800:
+        return "off"
+    return "dis"
+
+
+def to_number(value):
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return None
+    if n != n:
+        return None
+    return n
+
+
+def local_profile_payload(coin: str, detail: dict) -> dict:
+    hashrate = to_number(detail.get("hashrate_user")) or 0.0
+    all_time_reward = to_number(detail.get("rewards_total")) or 0.0
+    return {
+        coin: {
+            "hash_rate_5m": hashrate,
+            "hash_rate_60m": hashrate,
+            "hash_rate_24h": hashrate,
+            "hash_rate_unit": "h/s",
+            "today_reward": 0.0,
+            "all_time_reward": all_time_reward,
+            "current_balance": 0.0,
+        }
+    }
+
+
+def local_workers_payload(coin: str, detail: dict) -> dict:
+    miners = detail.get("miners") or []
+    workers = {}
+    for miner in miners:
+        name = str(miner.get("name") or miner.get("raw_worker") or "")
+        if not name:
+            continue
+        workers[name] = {
+            "state": map_worker_state(miner.get("seconds_since_last_share")),
+            "last_share": to_number(miner.get("last_share_ts")) or to_number(miner.get("last_seen")) or 0,
+            "hash_rate_5m": to_number(miner.get("hashrate_miner")) or 0.0,
+            "hash_rate_unit": "h/s",
+            "accepted": to_number(miner.get("accepted")) or 0,
+            "rejected": to_number(miner.get("rejected")) or 0,
+            "dup": to_number(miner.get("dup")) or 0,
+        }
+    return {coin: {"workers": workers}}
+
+
+def local_stats_payload(coin: str, users: list) -> dict:
+    total_hashrate = 0.0
+    total_users = 0
+    total_workers = 0
+    for u in users:
+        total_users += 1
+        total_hashrate += to_number(u.get("hashrate_user")) or 0.0
+        total_workers += int(to_number(u.get("miner_count")) or 0)
+    return {
+        coin: {
+            "pool_60m_hash_rate": total_hashrate,
+            "pool_active_users": total_users,
+            "pool_active_workers": total_workers,
+            "hash_rate_unit": "h/s",
+        }
+    }
+
+
+def local_rewards_payload(coin: str) -> dict:
+    return {coin: {"daily_rewards": []}}
+
+
+def empty_profile_payload(coin: str) -> dict:
+    return {
+        coin: {
+            "hash_rate_5m": 0.0,
+            "hash_rate_60m": 0.0,
+            "hash_rate_24h": 0.0,
+            "hash_rate_unit": "h/s",
+            "today_reward": 0.0,
+            "all_time_reward": 0.0,
+            "current_balance": 0.0,
+        }
+    }
+
+
+def empty_workers_payload(coin: str) -> dict:
+    return {coin: {"workers": {}}}
+
+
+def empty_stats_payload(coin: str) -> dict:
+    return {
+        coin: {
+            "pool_60m_hash_rate": 0.0,
+            "pool_active_users": 0,
+            "pool_active_workers": 0,
+            "hash_rate_unit": "h/s",
+        }
+    }
+
+
+def miner_profile_response(user: dict, coin: str, username: str | None = None) -> dict:
+    if MINER_PROVIDER != "local":
+        return empty_profile_payload(coin)
+    pool_user = resolve_pool_username(user, username)
+    if not pool_user:
+        return empty_profile_payload(coin)
+    detail = local_pool_get(f"/v1/mining/users/{pool_user}")
+    if not isinstance(detail, dict):
+        raise HTTPException(status_code=502, detail="Local pool API returned unexpected user detail payload")
+    return local_profile_payload(coin, detail)
+
+
+def miner_workers_response(user: dict, coin: str, username: str | None = None) -> dict:
+    if MINER_PROVIDER != "local":
+        return empty_workers_payload(coin)
+    pool_user = resolve_pool_username(user, username)
+    if not pool_user:
+        return empty_workers_payload(coin)
+    detail = local_pool_get(f"/v1/mining/users/{pool_user}")
+    if not isinstance(detail, dict):
+        raise HTTPException(status_code=502, detail="Local pool API returned unexpected workers payload")
+    return local_workers_payload(coin, detail)
+
+
+def miner_stats_response(coin: str) -> dict:
+    if MINER_PROVIDER != "local":
+        return empty_stats_payload(coin)
+    users = local_pool_get("/v1/mining/users")
+    if not isinstance(users, list):
+        raise HTTPException(status_code=502, detail="Local pool API returned unexpected users payload")
+    return local_stats_payload(coin, users)
+
+
+def miner_rewards_response(user: dict, coin: str, username: str | None = None) -> dict:
+    if MINER_PROVIDER != "local":
+        return local_rewards_payload(coin)
+    pool_user = resolve_pool_username(user, username)
+    if not pool_user:
+        return local_rewards_payload(coin)
+    return local_rewards_payload(coin)
+
+
+def build_miner_snapshot(user: dict, coin: str, username: str | None = None) -> dict:
+    return {
+        "type": "miner_update",
+        "coin": coin,
+        "profile": miner_profile_response(user, coin, username),
+        "workers": miner_workers_response(user, coin, username),
+        "stats": miner_stats_response(coin),
+        "rewards": miner_rewards_response(user, coin, username),
+        "updated_at": datetime.utcnow().isoformat(),
+    }
 
 app = FastAPI()
 
@@ -621,37 +840,69 @@ def get_candles(limit: int = 120):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ─── Braiins Miner Endpoints ────────────────────────────────────────────────
+# ─── Miner Endpoints ────────────────────────────────────────────────────────
 
+@app.get("/api/miner/profile")
 @app.get("/api/miner/braiins/profile")
-def braiins_profile(request: Request, coin: str = "btc"):
-    get_current_user(request.headers.get("authorization"))
-    return braiins_get(f"/accounts/profile/json/{coin}/")
+def braiins_profile(request: Request, coin: str = "btc", username: str | None = None):
+    user = get_current_user(request.headers.get("authorization"))
+    return miner_profile_response(user, coin, username)
 
 
+@app.get("/api/miner/workers")
 @app.get("/api/miner/braiins/workers")
-def braiins_workers(request: Request, coin: str = "btc"):
-    get_current_user(request.headers.get("authorization"))
-    return braiins_get(f"/accounts/workers/json/{coin}")
+def braiins_workers(request: Request, coin: str = "btc", username: str | None = None):
+    user = get_current_user(request.headers.get("authorization"))
+    return miner_workers_response(user, coin, username)
 
 
+@app.get("/api/miner/stats")
 @app.get("/api/miner/braiins/stats")
 def braiins_stats(request: Request, coin: str = "btc"):
     get_current_user(request.headers.get("authorization"))
-    return braiins_get(f"/stats/json/{coin}")
+    return miner_stats_response(coin)
 
 
+@app.get("/api/miner/rewards")
 @app.get("/api/miner/braiins/rewards")
 def braiins_rewards(
     request: Request,
     coin: str = "btc",
     from_date: str | None = Query(default=None, alias="from"),
     to_date: str | None = Query(default=None, alias="to"),
+    username: str | None = None,
 ):
-    get_current_user(request.headers.get("authorization"))
-    query = {}
-    if from_date:
-        query["from"] = from_date
-    if to_date:
-        query["to"] = to_date
-    return braiins_get(f"/accounts/rewards/json/{coin}", query=query or None)
+    user = get_current_user(request.headers.get("authorization"))
+    return miner_rewards_response(user, coin, username)
+
+
+@app.websocket("/ws/miner")
+async def websocket_miner(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        token = websocket.query_params.get("token")
+        if not token:
+            await websocket.send_json({"type": "error", "detail": "Missing token query param"})
+            await websocket.close(code=1008)
+            return
+
+        coin = (websocket.query_params.get("coin") or "btc").lower()
+        username = websocket.query_params.get("username")
+        user = get_current_user(f"Bearer {token}")
+
+        while True:
+            payload = build_miner_snapshot(user, coin, username)
+            await websocket.send_json(payload)
+            await asyncio.sleep(5)
+    except HTTPException as e:
+        try:
+            await websocket.send_json({"type": "error", "detail": e.detail})
+        finally:
+            await websocket.close(code=1008)
+    except WebSocketDisconnect:
+        return
+    except Exception as e:
+        try:
+            await websocket.send_json({"type": "error", "detail": str(e)})
+        finally:
+            await websocket.close(code=1011)
