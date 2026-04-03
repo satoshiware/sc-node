@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { FiChevronLeft } from 'react-icons/fi'
+import Workers from './Workers'
 import { Bar, Line } from 'react-chartjs-2'
 import {
   Chart as ChartJS,
@@ -44,6 +45,8 @@ export default function Miner({ setView, user }) {
     lastShare: null,
   })
   const [dailyRewards, setDailyRewards] = useState(null)
+  const [workersList, setWorkersList] = useState([])
+  const [minerTab, setMinerTab] = useState('mining') // 'mining' | 'workers'
 
   const coinKey = COIN.toLowerCase()
   const coinLabel = COIN.toUpperCase()
@@ -133,6 +136,8 @@ export default function Miner({ setView, user }) {
         let off = 0
         let dis = 0
 
+        const unitForWorkers = profileData?.hash_rate_unit || 'Gh/s'
+
         Object.values(workersMap).forEach((w) => {
           const state = String(w?.state || '').toLowerCase()
           if (state === 'ok') active += 1
@@ -143,6 +148,23 @@ export default function Miner({ setView, user }) {
           const share = Number(w?.last_share)
           if (Number.isFinite(share) && (!maxLastShare || share > maxLastShare)) {
             maxLastShare = share
+          }
+        })
+
+        const workerRows = Object.entries(workersMap).map(([wid, w]) => {
+          const u = w?.hash_rate_unit || unitForWorkers
+          return {
+            id: wid,
+            name: w?.name || w?.worker_name || w?.worker || wid || '[auto]',
+            state: String(w?.state || '').toLowerCase(),
+            hr5m: toTHs(Number(w?.hash_rate_5m ?? w?.hashrate_5m ?? 0), u),
+            hr60m: toTHs(Number(w?.hash_rate_60m ?? w?.hashrate_60m ?? 0), u),
+            hr24h: toTHs(Number(w?.hash_rate_24h ?? w?.hashrate_24h ?? 0), u),
+            alertLimit: toTHs(
+              Number(w?.hash_rate_alert_limit ?? w?.alert_limit ?? w?.warning_hashrate ?? 0),
+              u
+            ),
+            labels: Array.isArray(w?.labels) ? w.labels.join(', ') : w?.label || '',
           }
         })
 
@@ -167,10 +189,12 @@ export default function Miner({ setView, user }) {
         setPoolStats(statsData)
         setWorkerCounts({ active, low, off, dis, lastShare: maxLastShare })
         setDailyRewards(normalizedRewards)
+        setWorkersList(workerRows)
         setLastUpdated(new Date())
       } catch (e) {
         if (!cancelled) {
           setError(e?.message || 'Failed to load miner data')
+          setWorkersList([])
         }
       } finally {
         if (!cancelled) setLoading(false)
@@ -378,20 +402,40 @@ export default function Miner({ setView, user }) {
           {/* Top sub-navigation */}
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap items-center gap-2 text-xs sm:text-sm">
-              <button className="px-3 py-1.5 rounded-full bg-blue-600 text-white font-medium shadow-sm">
+              <button
+                type="button"
+                onClick={() => setMinerTab('mining')}
+                className={
+                  minerTab === 'mining'
+                    ? 'px-3 py-1.5 rounded-full bg-blue-600 text-white font-medium shadow-sm'
+                    : 'px-3 py-1.5 rounded-full bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700'
+                }
+              >
                 Mining
               </button>
-              <button className="px-3 py-1.5 rounded-full bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700">
-                Funds
+              <button
+                type="button"
+                onClick={() => setMinerTab('workers')}
+                className={
+                  minerTab === 'workers'
+                    ? 'px-3 py-1.5 rounded-full bg-blue-600 text-white font-medium shadow-sm'
+                    : 'px-3 py-1.5 rounded-full bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700'
+                }
+              >
+                Workers
               </button>
-              <button className="px-3 py-1.5 rounded-full bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700">
+              <button
+                type="button"
+                className="px-3 py-1.5 rounded-full bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 opacity-80 cursor-not-allowed"
+                disabled
+              >
                 History
               </button>
             </div>
           </div>
 
           {/* Info banner */}
-          {showBanner && (
+          {showBanner && minerTab === 'mining' && (
             <div className="relative bg-amber-500/10 border border-amber-500/40 rounded-lg px-4 py-3 pr-10 text-xs sm:text-sm text-amber-100">
               <button
                 type="button"
@@ -408,7 +452,22 @@ export default function Miner({ setView, user }) {
             </div>
           )}
 
-          {/* Main dashboard card */}
+          {minerTab === 'workers' ? (
+            <Workers
+              hash5m={hash5m}
+              hash60m={hash60m}
+              hash24h={hash24h}
+              workerCounts={workerCounts}
+              workers={workersList}
+              loading={loading}
+              error={error}
+              lastUpdated={lastUpdated}
+              formatLastShare={formatLastShare}
+              formatDec={formatDec}
+              displayHashrateUnit={displayHashrateUnit}
+              user={user}
+            />
+          ) : (
           <div className="bg-gray-900/70 border border-gray-800 rounded-xl shadow-lg p-4 sm:p-6 space-y-6">
             {/* Header */}
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -595,6 +654,7 @@ export default function Miner({ setView, user }) {
               </div>
             </div>
           </div>
+          )}
         </div>
       </div>
     </div>
