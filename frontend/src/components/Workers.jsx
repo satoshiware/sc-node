@@ -127,7 +127,7 @@ export default function Workers({
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <h1 className="text-xl sm:text-2xl font-semibold text-white">Workers</h1>
         <a
-          href="https://satoshiware.com/"
+          href="https://satoshiware.org/"
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex items-center gap-2 text-xs sm:text-sm text-violet-400 hover:text-violet-300 max-w-md"

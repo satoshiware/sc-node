@@ -185,14 +185,34 @@ def local_workers_payload(coin: str, detail: dict) -> dict:
         name = str(miner.get("name") or miner.get("raw_worker") or "")
         if not name:
             continue
+
+        worker_detail = {}
+        try:
+            worker_detail = local_pool_get(f"/v1/mining/workers/{parse.quote(name, safe='')}")
+            if not isinstance(worker_detail, dict):
+                worker_detail = {}
+        except HTTPException:
+            # Keep endpoint resilient: one worker detail failure should not block all workers.
+            worker_detail = {}
+
+        merged = {**miner, **worker_detail}
+        hashrate = to_number(merged.get("hashrate_miner")) or to_number(merged.get("hashrate_user")) or 0.0
+
         workers[name] = {
-            "state": map_worker_state(miner.get("seconds_since_last_share")),
-            "last_share": to_number(miner.get("last_share_ts")) or to_number(miner.get("last_seen")) or 0,
-            "hash_rate_5m": to_number(miner.get("hashrate_miner")) or 0.0,
+            "name": name,
+            "worker_name": merged.get("miner_name") or name,
+            "raw_worker": merged.get("raw_worker") or name,
+            "state": map_worker_state(merged.get("seconds_since_last_share")),
+            "last_share": to_number(merged.get("last_share_ts")) or to_number(merged.get("last_seen")) or 0,
+            "hash_rate_5m": hashrate,
+            "hash_rate_60m": hashrate,
+            "hash_rate_24h": hashrate,
             "hash_rate_unit": "h/s",
-            "accepted": to_number(miner.get("accepted")) or 0,
-            "rejected": to_number(miner.get("rejected")) or 0,
-            "dup": to_number(miner.get("dup")) or 0,
+            "accepted": to_number(merged.get("accepted")) or 0,
+            "rejected": to_number(merged.get("rejected")) or 0,
+            "dup": to_number(merged.get("dup")) or 0,
+            "alert_limit": 0,
+            "labels": merged.get("labels") or [],
         }
     return {coin: {"workers": workers}}
 

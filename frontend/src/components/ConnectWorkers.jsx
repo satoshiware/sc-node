@@ -2,23 +2,43 @@ import React, { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { FiCopy, FiX } from 'react-icons/fi'
 
-const STRATUM_V1_URL = 'stratum+tcp://stratum.satoshiware.com:3333'
-const STRATUM_V2_URL = 'stratum+tcp://v2.stratum.satoshiware.com:3333'
+function normalizeHost(raw) {
+  const text = String(raw || '').trim()
+  if (!text) return ''
+
+  // Remove scheme if provided in env and keep only hostname.
+  const noScheme = text.replace(/^[a-z]+:\/\//i, '')
+  const hostOnly = noScheme.split('/')[0]
+  return hostOnly.split(':')[0]
+}
+
+function getPoolHostFromEnv() {
+  const explicitBase = import.meta.env.VITE_LOCAL_POOL_BASE_URL
+  const apiUrl = import.meta.env.VITE_API_URL
+  return normalizeHost(explicitBase) || normalizeHost(apiUrl) || 'localhost'
+}
+
+function buildStratumUrl(host, protocol) {
+  const v2Host = host.startsWith('v2.') ? host : `v2.${host}`
+  const targetHost = protocol === 'v2' ? v2Host : host
+  return `stratum+tcp://${targetHost}:3333`
+}
 
 function poolLoginId(user) {
   if (!user) return 'yourAccount'
-  const fromEmail = user.email?.split('@')[0]?.trim()
-  if (fromEmail) return fromEmail
-  const fromName = user.name?.replace(/\s+/g, '')?.trim()
+  const fromName = String(user.name || '').trim().replace(/\s+/g, '')
   if (fromName) return fromName
+  const fromEmail = String(user.email || '').split('@')[0]?.trim()
+  if (fromEmail) return fromEmail
   return 'yourAccount'
 }
 
 export default function ConnectWorkers({ open, onClose, user }) {
   const [protocol, setProtocol] = useState('v1')
   const [copied, setCopied] = useState(false)
+  const poolHost = useMemo(() => getPoolHostFromEnv(), [])
 
-  const stratumUrl = protocol === 'v1' ? STRATUM_V1_URL : STRATUM_V2_URL
+  const stratumUrl = useMemo(() => buildStratumUrl(poolHost, protocol), [poolHost, protocol])
   const urlLine = useMemo(() => `#1 ${stratumUrl}`, [stratumUrl])
   const loginId = useMemo(() => poolLoginId(user), [user])
 

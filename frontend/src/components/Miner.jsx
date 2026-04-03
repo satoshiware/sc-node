@@ -178,6 +178,8 @@ export default function Miner({ setView, user }) {
           }
         })
 
+      setWorkersList(workerRows)
+
       const normalizedRewards = rewardRows
         .map((r) => {
           const ts = Number(r?.date)
