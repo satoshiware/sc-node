@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import { FiCopy, FiX } from 'react-icons/fi'
 
 const STRATUM_V1_URL = 'stratum+tcp://stratum.satoshiware.com:3333'
-const STRATUM_V2_URL = 'stratum+tcp://v2.stratum.braiins.com:3333'
+const STRATUM_V2_URL = 'stratum+tcp://v2.stratum.satoshiware.com:3333'
 
 function poolLoginId(user) {
   if (!user) return 'yourAccount'
