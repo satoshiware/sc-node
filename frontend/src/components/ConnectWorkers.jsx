@@ -90,7 +90,7 @@ export default function ConnectWorkers({ open, onClose, user }) {
 
         <div className="max-h-[min(85vh,640px)] overflow-y-auto px-5 py-4 space-y-5 text-sm text-gray-700">
           <p className="leading-relaxed">
-            Braiins Pool servers are located all around the world. For a stable connection and lower latency,{' '}
+            Satoshiware Pool servers are located all around the world. For a stable connection and lower latency,{' '}
             <strong className="font-semibold text-gray-900">please select a location</strong> that is closest to your
             mining location.
           </p>
