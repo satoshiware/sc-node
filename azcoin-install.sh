@@ -42,9 +42,8 @@ set -euo pipefail
 #   bootstrap points so new SC Nodes can connect and then gossip to discover the rest
 #   of the network.
 #
-#   This install script will point the AZCoin node to azcoin-seed.satoshiware.org,
-#   which uses round-robin DNS and the Internet's BGP routing protocol to
-#   distribute load across multiple backend seeder nodes.
+#   The seed node can be added manually, or (recommended) by running a
+#   follow-up configuration script.
 #
 # Recommended ratio: One dedicated seeder node for every 500 SC Nodes.
 #   Start with 1:500 and adjust based on sync performance and network load.
@@ -56,6 +55,9 @@ set -euo pipefail
 #   Be sure to configure each seeder node to connect with several other prominent
 #   and well-established AZCoin nodes using the addnode= parameter in azcoin.conf to
 #   help ensure all nodes remain well-connected.
+#
+# IBD Acceleration:
+#   bitcoin.conf options: blocksonly=1, higher dbcache, and local connect
 # =============================================================================
 
 LOG_FILE="/var/log/azcoin-install.log"
@@ -269,13 +271,21 @@ rpcallowip=127.0.0.1
 
 # IP address your node will advertise to the network so other nodes can connect inbound.
 # Use your VPN exit IP, VPS public IP, or home public IP here. Update as needed.
-externalip=192.0.2.1
+# UPDATE EXTERNALIP
+externalip=123.45.67.89
 
 # P2P listening port for incoming connections from other nodes/peers (Default is 19333)
-port=12345
+# UPDATE PORT
+port=19333
 
 # Force persistent outbound connection to specific trusted peer(s)
-addnode=azcoin-seed.satoshiware.org
+# UPDATE ADDNODE
+addnode=azcoin-seed.example.com
+
+# Control network/internet traffic during IBD
+# Overrides addnode parameter; disabled all other p2p connections.
+# UPDATE CONNECT
+#connect=azcoin-ibd.internal
 
 # Auto-load our named wallet
 wallet=wallet
@@ -295,9 +305,14 @@ maxuploadtarget=5000
 # ZMQ: publish new block hash locally (for real-time monitoring)
 zmqpubhashblock=tcp://127.0.0.1:29334
 
-# UTXO cache: 2 GB for faster sync/validation
-# Safe on 32+ GB RAM hosts; prevents OOM/swap
-dbcache=2048
+# UTXO cache: 3 GB for faster sync/validation; Safe on 32+ GB RAM hosts; prevents OOM/swap
+# Use more RAM (e.g. 4096 to 8192) to speed up IBD
+# UPDATE DBCACHE
+dbcache=3072
+
+# Set to 1 to skip transaction relay during IBD → much faster sync
+# UPDATE BLOCKSONLY
+blocksonly=0
 EOF
 
     chown azcoin:azcoin /etc/azcoin/azcoin.conf
@@ -330,7 +345,7 @@ log "Created FHS log symlink: ${LOG_SYMLINK} → /var/lib/azcoin/debug.log"
 # ===================== LOGROTATE =====================
 log "Configuring logrotate..."
 cat > /etc/logrotate.d/azcoin << EOF
-${LOG_SYMLINK} {
+/var/lib/azcoin/debug.log {
     daily
     rotate 14
     compress
@@ -441,6 +456,7 @@ AZC_ALIAS="alias azc='sudo -u azcoin azcoin-cli -conf=/etc/azcoin/azcoin.conf -d
 if ! grep -Fxq "$AZC_ALIAS" "$TARGET"; then
     echo "$AZC_ALIAS" | tee -a "$TARGET" > /dev/null
     log "Added azc alias to $TARGET"
+    source "$TARGET" && log "azc alias is now active"
 else
     log "azc alias already present"
 fi
@@ -475,22 +491,27 @@ cat > "${README_FILE}" << EOF
     symlink to /var/lib/azcoin/debug.log (640 azcoin:azcoin)
     wallet_events.log (640 azcoin:azcoin)
 
-- rpcpassword: ${RPC_PASSWORD_FILE} (600 azcoin:azcoin)
-    rpcpassword directory: ${RPC_PASSWORD_DIR} (700 azcoin:azcoin)
+- rpcpassword directory: ${RPC_PASSWORD_DIR} (700 azcoin:azcoin)
+    rpcpassword: ${RPC_PASSWORD_FILE} (600 azcoin:azcoin)
 
 - azcoin-install setup log file: ${LOG_FILE} (644 root:root)
 
 - systemd service file: /etc/systemd/system/azcoind.service (644 root:root)
+
+## Key Configuration Settings:
+  - externalip: Make sure it matches the IP of the backend server
+  - port: Must match the assigned port from the backend server
+  - addnode: Backend server seednode for AZCoin
 
 ## Management
 - Start/Stop: sudo systemctl start/stop azcoind
 - Status/Logs: sudo systemctl status azcoind or sudo journalctl -u azcoind -f
 - RPC Test (.cookie authentication): sudo -u azcoin azcoin-cli -conf=/etc/azcoin/azcoin.conf -datadir=/var/lib/azcoin getblockchaininfo
 - RPC Test (rpcauth authentication):
-    PASSWORD=$(sudo cat /home/azcoin/rpcpassword)
+    PASSWORD=\$(sudo cat /home/azcoin/rpcpassword)
     curl --data-binary '{"jsonrpc":"1.0","id":"test","method":"getblockchaininfo","params":[]}' \
         -H 'content-type: text/plain;' \
-        --user "satoshi:$PASSWORD" \
+        --user "satoshi:\$PASSWORD" \
         http://127.0.0.1:19332/
 
 ## Notes
