@@ -7,13 +7,12 @@ set -euo pipefail
 #   - Stratum V1 to Stratum V2 translator
 #   - Aggregates all incoming (V1) to one outgoing (V2)
 #   - Runs two independent instances. One for Bitcoin and one for AZCoin
-#       → Bitcoin shows in processes (ps) as "stratum bitcoin"
-#       → AZCoin shows in processes (ps) as "stratum azcoin"
 #   - Provides per miner (worker) logging
 #   - Includes logrotate with copytruncate (no data loss during rotation)
 #       → Log rotation (daily or 100MB) with 14-day retention
 #   - HTTP REST API
-#       → monitoring_address = "127.0.0.1:9092"
+#       → monitoring_address = "127.0.0.1:9092" # Bitcoin
+#       → monitoring_address = "127.0.0.1:9093" # AZCoin
 #
 # Ports:
 #   - Bitcoin:  3333
@@ -21,10 +20,6 @@ set -euo pipefail
 #
 # Configuration:
 #   - The user_identity includes the machine's serial number
-#   - The base domain for the mining URLs is sourced from /etc/sc-server/domain
-#   - The authority pubkey is sourced from the following files:
-#       → BITCOIN: /etc/sc-server/btc-stratum-authority-pubkey
-#       → AZCOIN: /etc/sc-server/azc-stratum-authority-pubkey
 # =====================================================================================
 
 INSTALL_LOG_FILE="/var/log/stratum-install.log"
@@ -186,11 +181,13 @@ job_keepalive_interval_secs = 60
 
 # ── Upstream SV2 Pool Connection ──
 [[upstreams]]
-address = "btc.stratum.$(head -n 1 /etc/sc-server/domain)"
+# UPDATE ADDRESS
+address = "btc.stratum.example.com"
 port = 3333
 
 # The Noise Protocol Authentication is enabled (or disabled) entirely by the presence (or absence) of the authority_pubkey field
-authority_pubkey = "$(head -n 1 /etc/sc-server/btc-stratum-authority-pubkey)"
+# UPDATE AUTHORITY_PUBKEY
+authority_pubkey = "32-byte-binary-public-key-xxxx"
 EOF
 
 cat > "$CONFIG_DIR/stratum-azcoin.toml" << EOF
@@ -229,7 +226,7 @@ supported_extensions = [
 ]
 
 # ── Setup HTTP Monitoring Server ──
-monitoring_address = "127.0.0.1:9092"
+monitoring_address = "127.0.0.1:9093"
 monitoring_cache_refresh_secs = 15
 
 # ── Difficulty / Vardiff Configuration ──
@@ -249,11 +246,13 @@ job_keepalive_interval_secs = 60
 
 # ── Upstream SV2 Pool Connection ──
 [[upstreams]]
-address = "azc.stratum.$(head -n 1 /etc/sc-server/domain)"
+# UPDATE ADDRESS
+address = "azc.stratum.example.com"
 port = 3334
 
 # The Noise Protocol Authentication is enabled (or disabled) entirely by the presence (or absence) of the authority_pubkey field
-authority_pubkey = "$(head -n 1 /etc/sc-server/azc-stratum-authority-pubkey)"
+# UPDATE AUTHORITY_PUBKEY
+authority_pubkey = "32-byte-binary-public-key-xxxx"
 EOF
 
 log "Configs created in $CONFIG_DIR/"
@@ -390,7 +389,7 @@ Management:
   - journalctl -u stratum-bitcoin -f
   - journalctl -u stratum-azcoin -f
 
-HTTP REST API Endpoints (monitoring_address = "127.0.0.1:9092")
+HTTP REST API Endpoints (monitoring_address = "127.0.0.1:9092" [Bitcoin] / "127.0.0.1:9092" [AZCoin])
   - Health
     → Health check                          /api/v1/health
 
