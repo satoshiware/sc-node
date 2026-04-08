@@ -86,8 +86,7 @@ echo ""
 read -p "Enter version number (e.g. 0.2.0) or press Enter for latest: " SELECTED_VERSION
 
 if [[ -z "$SELECTED_VERSION" ]]; then
-    LATEST_TAG=$(curl -s https://api.github.com/repos/satoshiware/azcoin/releases/latest | grep '"tag_name":' | cut -d '"' -f4)
-    VERSION=${LATEST_TAG#v}
+    VERSION=$(curl -s https://api.github.com/repos/satoshiware/azcoin/releases/latest | grep '"tag_name":' | cut -d '"' -f4)
     log "Using latest version: $VERSION"
 else
     VERSION="$SELECTED_VERSION"
