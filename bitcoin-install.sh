@@ -24,8 +24,7 @@ set -euo pipefail
 #   install script to set up one of these nodes with the proper configuration.
 #
 # IBD Acceleration:
-#   See the "IBD Acceleration Settings" at the bottom of the bitcoin.conf section.
-#   Options: blocksonly=1, higher dbcache, and local addnode/connect
+#   bitcoin.conf options: blocksonly=1, higher dbcache, and local connect
 # =============================================================================
 
 LOG_FILE="/var/log/bitcoin-install.log"
@@ -232,6 +231,11 @@ rpcbind=127.0.0.1
 # Restrict RPC callers to localhost
 rpcallowip=127.0.0.1
 
+# Control network/internet traffic during IBD
+# Disabled all other p2p connections
+# UPDATE CONNECT
+#connect=bitcoin-ibd.internal
+
 # Auto-load our named wallet
 wallet=wallet
 
@@ -262,27 +266,14 @@ maxuploadtarget=5000
 # ZMQ: publish new block hash locally (for real-time monitoring)
 zmqpubhashblock=tcp://127.0.0.1:28332
 
-# UTXO cache: 4 GB for faster sync/validation
-# Safe on 32+ GB RAM hosts; prevents OOM/swap
-dbcache=4096
+# UTXO cache: 6 GB for faster sync/validation; Safe on 32+ GB RAM hosts; prevents OOM/swap
+# Use more RAM (e.g. 8192 to 16384) to speed up IBD
+# UPDATE DBCACHE
+dbcache=6144
 
-# =============================================================================
-# IBD Acceleration Settings (Uncomment / adjust during initial sync)
-# =============================================================================
-# These settings can dramatically speed up Initial Block Download on new nodes.
-# Uncomment the lines below for the first run. After sync, they can be commented out again.
-
-# Skip most transaction relay during IBD → much faster sync
-# blocksonly=1
-
-# Use more RAM for cache during IBD (Be sure to comment out "dbcache=" setting above)
-# dbcache=8192
-# dbcache=16384
-
-# Connect to Local trusted feeder full nodes (Most effective) on the internal network
-# addnode=10.0.0.50             # Internal IP of your full feeder node #1
-# addnode=10.0.0.51             # Internal IP of your full feeder node #2
-# connect=10.0.0.50             # Optional: force ONLY these peers during early sync
+# Set to 1 to skip transaction relay during IBD → much faster sync
+# UPDATE BLOCKSONLY
+blocksonly=0
 EOF
 
     chown bitcoin:bitcoin /etc/bitcoin/bitcoin.conf
@@ -315,7 +306,7 @@ log "Created FHS log symlink: ${LOG_SYMLINK} → /var/lib/bitcoin/debug.log"
 # ===================== LOGROTATE =====================
 log "Configuring logrotate..."
 cat > /etc/logrotate.d/bitcoin << EOF
-${LOG_SYMLINK} {
+/var/lib/bitcoin/debug.log {
     daily
     rotate 14
     compress
@@ -426,6 +417,7 @@ BTC_ALIAS="alias btc='sudo -u bitcoin bitcoin-cli -conf=/etc/bitcoin/bitcoin.con
 if ! grep -Fxq "$BTC_ALIAS" "$TARGET"; then
     echo "$BTC_ALIAS" | tee -a "$TARGET" > /dev/null
     log  "Added btc alias to $TARGET"
+    source "$TARGET" && log "btc alias is now active"
 else
     log  "btc alias already present"
 fi
@@ -460,8 +452,8 @@ cat > "${README_FILE}" << EOF
     symlink to /var/lib/bitcoin/debug.log (640 bitcoin:bitcoin)
     wallet_events.log (640 bitcoin:bitcoin)
 
-- rpcpassword: ${RPC_PASSWORD_FILE} (600 bitcoin:bitcoin)
-    rpcpassword directory: ${RPC_PASSWORD_DIR} (700 bitcoin:bitcoin)
+- rpcpassword directory: ${RPC_PASSWORD_DIR} (700 bitcoin:bitcoin)
+    rpcpassword: ${RPC_PASSWORD_FILE} (600 bitcoin:bitcoin)
 
 - bitcoin-install setup log file: ${LOG_FILE} (644 root:root)
 
@@ -472,10 +464,10 @@ cat > "${README_FILE}" << EOF
 - Status/Logs: sudo systemctl status bitcoind   or   sudo journalctl -u bitcoind -f
 - RPC Test (.cookie authentication): sudo -u bitcoin bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getblockchaininfo
 - RPC Test (rpcauth authentication):
-    PASSWORD=$(sudo cat /home/bitcoin/rpcpassword)
+    PASSWORD=\$(sudo cat /home/bitcoin/rpcpassword)
     curl --data-binary '{"jsonrpc":"1.0","id":"test","method":"getblockchaininfo","params":[]}' \
         -H 'content-type: text/plain;' \
-        --user "satoshi:$PASSWORD" \
+        --user "satoshi:\$PASSWORD" \
         http://127.0.0.1:8332/
 
 ## Notes
