@@ -86,7 +86,8 @@ echo ""
 read -p "Enter version number (e.g. 0.2.0) or press Enter for latest: " SELECTED_VERSION
 
 if [[ -z "$SELECTED_VERSION" ]]; then
-    VERSION=$(curl -s https://api.github.com/repos/satoshiware/azcoin/releases/latest | grep '"tag_name":' | cut -d '"' -f4)
+    LATEST_TAG=$(curl -s https://api.github.com/repos/satoshiware/azcoin/releases/latest | grep '"tag_name":' | cut -d '"' -f4)
+    VERSION=${LATEST_TAG#v}
     log "Using latest version: $VERSION"
 else
     VERSION="$SELECTED_VERSION"
@@ -105,7 +106,7 @@ case $(uname -m) in
 esac
 
 TAR_NAME="azcoin-${VERSION}-${ARCH_SUFFIX}.tar.gz"
-DOWNLOAD_URL="https://github.com/satoshiware/azcoin/releases/download/${VERSION}/${TAR_NAME}"
+DOWNLOAD_URL="https://github.com/satoshiware/azcoin/releases/download/v${VERSION}/${TAR_NAME}"
 
 TMP_DOWNLOAD=$(mktemp -d)
 cd "${TMP_DOWNLOAD}"
@@ -270,7 +271,6 @@ AZC_ALIAS="alias azc='sudo -u azcoin azcoin-cli -conf=/etc/azcoin/azcoin.conf -d
 if ! grep -Fxq "$AZC_ALIAS" "$TARGET"; then
     echo "$AZC_ALIAS" | tee -a "$TARGET" > /dev/null
     log "Added azc alias to $TARGET"
-    source "$TARGET" && log "azc alias is now active"
 else
     log "azc alias already present"
 fi
@@ -320,3 +320,13 @@ log "Created symlink: /home/azcoin/readme.txt"
 
 log "AZCoin Seeder Node installation completed successfully!"
 log "Review the log: ${LOG_FILE}"
+
+# === REBOOT SECTION ===
+echo ""; echo "WARNING: System will reboot in 5 seconds..."
+for i in {5..1}; do
+    echo -n "."
+    sleep 1
+done
+
+echo ""; echo "Rebooting now..."
+reboot
