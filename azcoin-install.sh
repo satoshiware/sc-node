@@ -152,7 +152,7 @@ if [[ -z "${TAR_FILE}" ]]; then
     log "Latest versioned release detected: ${LATEST_TAG} → ${LATEST_VERSION} (${ARCH_SUFFIX})"
 
     # AZCoin naming pattern (as used in your releases)
-    TAR_NAME="azcoin_azcoin-${LATEST_VERSION}-${ARCH_SUFFIX}.tar.gz"
+    TAR_NAME="azcoin-${LATEST_VERSION}-${ARCH_SUFFIX}.tar.gz"
     DOWNLOAD_URL="https://github.com/satoshiware/azcoin/releases/download/${LATEST_TAG}/${TAR_NAME}"
 
     log "Downloading ${TAR_NAME}..."
@@ -456,7 +456,6 @@ AZC_ALIAS="alias azc='sudo -u azcoin azcoin-cli -conf=/etc/azcoin/azcoin.conf -d
 if ! grep -Fxq "$AZC_ALIAS" "$TARGET"; then
     echo "$AZC_ALIAS" | tee -a "$TARGET" > /dev/null
     log "Added azc alias to $TARGET"
-    source "$TARGET" && log "azc alias is now active"
 else
     log "azc alias already present"
 fi
