@@ -271,7 +271,6 @@ BTC_ALIAS="alias btc='sudo -u bitcoin bitcoin-cli -conf=/etc/bitcoin/bitcoin.con
 if ! grep -Fxq "$BTC_ALIAS" "$TARGET"; then
     echo "$BTC_ALIAS" | tee -a "$TARGET" > /dev/null
     log "Added btc alias to $TARGET"
-    source "$TARGET" && log "btc alias is now active"
 else
     log "btc alias already present"
 fi
@@ -321,3 +320,13 @@ log "Created symlink: /home/bitcoin/readme.txt"
 
 log "Bitcoin Feeder Node installation completed successfully!"
 log "Review the log: ${LOG_FILE}"
+
+# === REBOOT SECTION ===
+echo ""; echo "WARNING: System will reboot in 5 seconds..."
+for i in {5..1}; do
+    echo -n "."
+    sleep 1
+done
+
+echo ""; echo "Rebooting now..."
+reboot
