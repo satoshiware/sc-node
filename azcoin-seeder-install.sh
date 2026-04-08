@@ -105,7 +105,7 @@ case $(uname -m) in
         ;;
 esac
 
-TAR_NAME="azcoin_azcoin-${VERSION}-${ARCH_SUFFIX}.tar.gz"
+TAR_NAME="azcoin-${VERSION}-${ARCH_SUFFIX}.tar.gz"
 DOWNLOAD_URL="https://github.com/satoshiware/azcoin/releases/download/${VERSION}/${TAR_NAME}"
 
 TMP_DOWNLOAD=$(mktemp -d)
