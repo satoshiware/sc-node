@@ -72,9 +72,17 @@ API_RESPONSE=$(curl -s https://api.github.com/repos/bitcoin/bitcoin/releases?per
 
 echo ""
 echo "Recent Bitcoin Core versions:"
-echo "$API_RESPONSE" | grep '"tag_name":' | cut -d '"' -f4 | nl
+
+# Extract versions, clean 'v' prefix, sort newest first, display without numbers
+echo "$API_RESPONSE" | grep '"tag_name":' | cut -d '"' -f4 \
+    | sed 's/^v//' \
+    | sort -V -r \
+    | while read -r ver; do
+        echo "   ${ver}"
+      done
 
 echo ""
+
 read -p "Enter version number (e.g. 30.2) or press Enter for latest: " SELECTED_VERSION
 
 if [[ -z "$SELECTED_VERSION" ]]; then
@@ -196,7 +204,7 @@ log "Created FHS log symlink: ${LOG_SYMLINK} → /var/lib/bitcoin/debug.log"
 # ===================== LOGROTATE =====================
 log "Configuring logrotate..."
 cat > /etc/logrotate.d/bitcoin << EOF
-${LOG_SYMLINK} {
+/var/lib/bitcoin/debug.log {
     daily
     rotate 14
     compress
@@ -263,6 +271,7 @@ BTC_ALIAS="alias btc='sudo -u bitcoin bitcoin-cli -conf=/etc/bitcoin/bitcoin.con
 if ! grep -Fxq "$BTC_ALIAS" "$TARGET"; then
     echo "$BTC_ALIAS" | tee -a "$TARGET" > /dev/null
     log "Added btc alias to $TARGET"
+    source "$TARGET" && log "btc alias is now active"
 else
     log "btc alias already present"
 fi

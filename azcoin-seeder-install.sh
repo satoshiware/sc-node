@@ -72,9 +72,17 @@ API_RESPONSE=$(curl -s https://api.github.com/repos/satoshiware/azcoin/releases?
 
 echo ""
 echo "Recent AZCoin versions:"
-echo "$API_RESPONSE" | grep '"tag_name":' | cut -d '"' -f4 | nl
+
+# Extract tag_names, remove 'v' prefix if present, sort newest first, and display without numbers
+echo "$API_RESPONSE" | grep '"tag_name":' | cut -d '"' -f4 \
+    | sed 's/^v//' \
+    | sort -V -r \
+    | while read -r ver; do
+        echo "   ${ver}"
+      done
 
 echo ""
+
 read -p "Enter version number (e.g. 0.2.0) or press Enter for latest: " SELECTED_VERSION
 
 if [[ -z "$SELECTED_VERSION" ]]; then
@@ -197,7 +205,7 @@ log "Created FHS log symlink: ${LOG_SYMLINK} → /var/lib/azcoin/debug.log"
 # ===================== LOGROTATE =====================
 log "Configuring logrotate..."
 cat > /etc/logrotate.d/azcoin << EOF
-${LOG_SYMLINK} {
+/var/lib/azcoin/debug.log {
     daily
     rotate 14
     compress
@@ -263,6 +271,7 @@ AZC_ALIAS="alias azc='sudo -u azcoin azcoin-cli -conf=/etc/azcoin/azcoin.conf -d
 if ! grep -Fxq "$AZC_ALIAS" "$TARGET"; then
     echo "$AZC_ALIAS" | tee -a "$TARGET" > /dev/null
     log "Added azc alias to $TARGET"
+    source "$TARGET" && log "azc alias is now active"
 else
     log "azc alias already present"
 fi
