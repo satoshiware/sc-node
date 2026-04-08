@@ -274,7 +274,7 @@ rpcallowip=127.0.0.1
 # UPDATE EXTERNALIP
 externalip=123.45.67.89
 
-# P2P listening port for incoming connections from other nodes/peers (Default is 19333)
+# Unique P2P listening port per SC Node for incoming connections from other nodes/peers
 # UPDATE PORT
 port=19333
 
