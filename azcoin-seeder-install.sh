@@ -162,6 +162,18 @@ DBCACHE=$((DBCACHE_GB * 1024))
 
 log "Using dbcache=${DBCACHE} MB"
 
+# ===================== INTERACTIVE SEED NODE URL =====================
+echo ""; echo "Enter the AZCoin seed node URL (example: azcoin-seed.example.com:19333 [19333 is default port; it can be omitted])"
+echo "This will be added as 'addnode=' in /etc/azcoin/azcoin.conf"
+read -p "Seed node URL: " SEED_NODE
+
+# No default - require user to enter something
+if [[ -z "$SEED_NODE" ]]; then
+    echo ""; echo "ERROR: Seed node URL is required. Please run the script again."
+    exit 1
+fi
+log "Using seed node: $SEED_NODE"
+
 # ===================== CONFIG =====================
 if [[ ! -f /etc/azcoin/azcoin.conf ]]; then
     log "Creating azcoin.conf for seeder node..."
@@ -188,7 +200,7 @@ disablewallet=1
 
 # Connect to other known seeds
 # Note: May resolve to itself 1 out of N times and simply drop the connection attempt (where N = number of backend seeders)
-addnode=azcoin-seed.satoshiware.org
+addnode=${SEED_NODE}
 EOF
 
     chown azcoin:azcoin /etc/azcoin/azcoin.conf
