@@ -139,10 +139,56 @@ The two install scripts, `bitcoin-feeder-install.sh` and `azcoin-seeder-install.
 They are used on dedicated powerful servers to support the large number of SC Nodes.
 
 ### Bitcoin Feeder Nodes
-- Full archival Bitcoin node (not pruned)
-- Helps pruned SC Nodes with IBD
-- Acts as a strong "giver" to offset the many outbound-only "taker" SC Nodes
-- Recommended ratio: **1 feeder per 1000 SC Nodes**
+
+SC (Bitcoin) Nodes are intentionally configured to stay lightweight and conserve bandwidth.
+As a result, they tend to "take" more from the network than they give back.
+
+**Bitcoin Feeder Nodes** help balance the ecosystem by acting as high-capacity **givers**.
+They provide valuable service to the broader Bitcoin network.
+
+#### Key Characteristics
+- Full archival node (`prune=0`) — keeps the complete blockchain history
+- Listening node — accepts inbound connections from other nodes
+- Blocks-only mode — optimized for better performance and lower resource usage
+- Recommended ratio: **1 well-provisioned feeder per ~1000 SC Nodes**
+
+#### Hardware Requirements
+- Fast CPU
+- Fast NVMe SSD (≥2 TB strongly recommended)
+- **64 GB+ RAM**
+- Strong upload bandwidth (this is usually the primary bottleneck)
+
+#### SC Node Deployment
+When new SC Nodes need to complete their Initial Block Download (IBD), it is best to keep that heavy traffic local.
+We recommend running at least one Feeder Node on the **same local network** where SC Nodes are being provisioned.
+
+#### Network Connectivity
+Feeder Nodes do not connect directly to SC Nodes, and no VPN or special tunnel is required.
+Therefore, the `externalip=` and port settings are determined entirely by the Feeder Node’s own local internet connection and router configuration.
+In other words, Feeders connect straight to the public internet — whether in a data center or on a stable business-grade home connection.
+
+#### Configuration & Networking Notes
+- **Configuration file**: `/etc/bitcoin/bitcoin.conf`
+- **dbcache**: Controls UTXO cache size. Default configuration:  **Total RAM - 8 GB** (minimum 4 GB). Higher values improve validation speed.
+- **Port**: Default is `8333`. When running multiple feeders on the same network, assign a unique port to each and update your router/firewall port-forwarding rules accordingly.
+- **maxconnections**: Default is `125`. For the recommended 1:1000 ratio this value needs to be increased.
+  **Warning**: Higher values increase RAM, CPU, open file limits, and bandwidth usage. Increase gradually and monitor system resources.
+
+After editing `bitcoin.conf`, restart the service with:```bash sudo systemctl restart bitcoind```
+
+#### External IP Updater
+This script is **enabled by default** and runs 4 times per day.
+It automatically checks the current public (external) IP address.
+If it differs from the `externalip=` setting in `bitcoin.conf`, the script updates the file and restarts Bitcoin Core.
+
+This is especially useful on NAT'd connections and dynamic IPs.
+**Script location:** `/usr/local/bin/btc-externalip-updater.sh`
+Manual run: `btc-externalip-updater.sh`
+Enable/disable cron: `btc-externalip-updater.sh --enable` or `--disable`
+
+**Important Networking Note (Multi-WAN / Load Balancing)**
+If your router uses multiple internet connections with load balancing, this can cause problems for a listening Bitcoin node (inconsistent external IP or broken inbound connections).
+For best results, configure the router so that **inbound and outbound traffic for the Bitcoin node uses a single consistent path** (e.g., pin the feeder’s traffic to one WAN interface).
 
 ### AZCoin Seeder Nodes
 - Acts as bootstrap/seeder node for the AZCoin network
