@@ -452,11 +452,6 @@ Key Paths:
 EOF
 log "Created feeder documentation at /usr/local/share/doc/bitcoin.txt"
 
-# Create symlink to README in bitcoin user's home directory
-ln -sfn /usr/local/share/doc/bitcoin.txt /home/bitcoin/readme.txt
-chown -h bitcoin:bitcoin /home/bitcoin/readme.txt
-log "Created symlink: /home/bitcoin/readme.txt"
-
 log "Bitcoin Feeder Node installation completed successfully!"
 log "Review the log: ${LOG_FILE}"
 
