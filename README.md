@@ -152,15 +152,20 @@ They provide valuable service to the broader Bitcoin network.
 - Blocks-only mode — optimized for better performance and lower resource usage
 - Recommended ratio: **1 well-provisioned feeder per ~1000 SC Nodes**
 
+After installation, refer to the local documentation on the node itself: `/usr/local/share/doc/bitcoin.txt`;
+It contains quick commands, key settings, and instructions for the IP updater.
+
 #### Hardware Requirements
 - Fast CPU
 - Fast NVMe SSD (≥2 TB strongly recommended)
 - **64 GB+ RAM**
 - Strong upload bandwidth (this is usually the primary bottleneck)
 
-#### SC Node Deployment
+#### SC [Bitcoin] Node Deployment
 When new SC Nodes need to complete their Initial Block Download (IBD), it is best to keep that heavy traffic local.
 We recommend running at least one Feeder Node on the **same local network** where SC Nodes are being provisioned.
+Note: In some cases, you may want this Feeder solely for your local SC Nodes (for fast IBD) without exposing it to the public internet.
+Keep the P2P port firewalled to prevent upload bandwidth from being used by random external peers.
 
 #### Network Connectivity
 Feeder Nodes do not connect directly to SC Nodes, and no VPN or special tunnel is required.
@@ -171,13 +176,13 @@ In other words, Feeders connect straight to the public internet — whether in a
 - **Configuration file**: `/etc/bitcoin/bitcoin.conf`
 - **dbcache**: Controls UTXO cache size. Default configuration:  **Total RAM - 8 GB** (minimum 4 GB). Higher values improve validation speed.
 - **Port**: Default is `8333`. When running multiple feeders on the same network, assign a unique port to each and update your router/firewall port-forwarding rules accordingly.
-- **maxconnections**: Default is `125`. For the recommended 1:1000 ratio this value needs to be increased.
-  **Warning**: Higher values increase RAM, CPU, open file limits, and bandwidth usage. Increase gradually and monitor system resources.
+- **maxconnections**: Default is `125`. To support the 1:1000 ratio this needs to be increased (e.g. 300–600).
+  **Note**: Even 125 connections can saturate upload bandwidth in some cases. Lower the value if you experience bandwidth issues or slow performance.
 
 After editing `bitcoin.conf`, restart the service with:```bash sudo systemctl restart bitcoind```
 
 #### External IP Updater
-This script is **enabled by default** and runs 4 times per day.
+This script is installed by the `bitcoin-feeder-install.sh` script and **enabled by default** to run 4 times per day via Cron.
 It automatically checks the current public (external) IP address.
 If it differs from the `externalip=` setting in `bitcoin.conf`, the script updates the file and restarts Bitcoin Core.
 
