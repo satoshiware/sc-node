@@ -9,7 +9,6 @@ set -euo pipefail
 #   • Full archival node (prune=0)
 #   • Listening node (accepts inbound connections)
 #   • blocks-only mode for better performance
-#   • High connection count and unlimited upload capacity
 #
 # Role in the Ecosystem:
 #   Acts as a "giver" node to offset the many pruned, outbound-only "taker"
@@ -18,11 +17,12 @@ set -euo pipefail
 #
 # Recommended hardware:
 #   - Fast CPU
-#   - At least 16 GB RAM (32 GB+ strongly preferred)
-#   - Fast NVMe SSD (SECONDARY BOTTLENECK)
+#   - 64 GB+ RAM
+#   - Fast 2 TB NVMe SSD
 #   - Fastest available network connection (PRIMARY BOTTLENECK)
 #
 # This script is designed for Debian-based Linux distributions
+# See bitcoin.txt file, prepared at bottom of this script, for more details.
 # =============================================================================
 
 LOG_FILE="/var/log/bitcoin-feeder-install.log"
@@ -39,32 +39,12 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # ===================== SYSTEM UPDATE =====================
-log "Updating and upgrading system packages..."
-apt-get update -qq
-apt-get full-upgrade -y
-apt-get autoremove -y
-apt-get autoclean
-
-# ===================== PYTHON CHECK =====================
-if ! command -v python >/dev/null 2>&1; then
-    log "'python' command not found. Installing python-is-python3..."
-    apt-get install -y python-is-python3
-    if ! command -v python >/dev/null 2>&1; then
-        log "ERROR: Failed to install python-is-python3. Cannot continue."
-        exit 1
-    fi
-    log "'python' command successfully installed and linked to Python 3."
-elif ! python --version 2>&1 | grep -q "Python 3"; then
-    log "Warning: 'python' command exists but is not Python 3. Installing python-is-python3..."
-    apt-get install -y python-is-python3
-    if ! python --version 2>&1 | grep -q "Python 3"; then
-        log "ERROR: Still cannot get Python 3 via 'python' command."
-        exit 1
-    fi
-    log "'python' now correctly points to Python 3."
-else
-    log "'python' command points to Python 3. Good!"
-fi
+log "Updating system packages and installing curl..."
+apt update -qq
+apt install -y curl
+apt full-upgrade -y
+apt autoremove -y
+apt autoclean -y
 
 # ===================== INTERACTIVE VERSION SELECTION =====================
 log "Fetching recent Bitcoin Core releases..."
@@ -142,25 +122,25 @@ install -m 0755 -o root -g root "${EXTRACTED_DIR}/bin/bitcoind"     /usr/local/b
 install -m 0755 -o root -g root "${EXTRACTED_DIR}/bin/bitcoin-cli"  /usr/local/bin/bitcoin-cli
 install -m 0755 -o root -g root "${EXTRACTED_DIR}/share/rpcauth/rpcauth.py" /usr/local/bin/rpcauth.py
 
-# ===================== INTERACTIVE DBCACHE SELECTION =====================
+# ===================== DBCACHE CALCULATION =====================
 TOTAL_RAM_GB=$(free --giga | awk '/^Mem:/ {print $2}' || echo "16")
-RESERVED_GB=4
-AVAILABLE_GB=$((TOTAL_RAM_GB - RESERVED_GB))
 
-log "Detected system RAM: ${TOTAL_RAM_GB} GB (reserving ${RESERVED_GB} GB for OS)"
+# Minimum 4 GB, target = Total RAM - 8 GB
+MIN_DBCACHE_GB=4
+TARGET_DBCACHE_GB=$((TOTAL_RAM_GB - 8))
 
-echo ""
-echo "Recommended dbcache (4 GB increments - aggressive for dedicated feeder):"
-for i in $(seq 4 $((AVAILABLE_GB / 4))); do
-    echo "   $((i*4)) GB"
-done
-echo ""
+# Ensure we never go below minimum
+if [[ $TARGET_DBCACHE_GB -lt $MIN_DBCACHE_GB ]]; then
+    DBCACHE_GB=$MIN_DBCACHE_GB
+else
+    DBCACHE_GB=$TARGET_DBCACHE_GB
+fi
 
-read -p "Enter dbcache value in GB [default: ${AVAILABLE_GB} ]: " DBCACHE_GB_INPUT
-DBCACHE_GB=${DBCACHE_GB_INPUT:-$AVAILABLE_GB}
+# Convert to MiB (what Bitcoin Core expects)
 DBCACHE=$((DBCACHE_GB * 1024))
 
-log "Using dbcache=${DBCACHE} MB"
+log "Detected system RAM: ${TOTAL_RAM_GB} GB"
+log "Setting dbcache = ${DBCACHE_GB} GB (${DBCACHE} MB)"
 
 # ===================== CONFIG =====================
 if [[ ! -f /etc/bitcoin/bitcoin.conf ]]; then
@@ -176,18 +156,29 @@ if [[ ! -f /etc/bitcoin/bitcoin.conf ]]; then
 # Full archival node
 prune=0
 
-# High-capacity listening feeder node
+# Listening feeder node
 listen=1
 discover=1
-maxconnections=125
-maxuploadtarget=0        # Unlimited upload - critical for feeder role
 
-# Performance settings
+# Unlimited upload - critical for feeder role
+maxuploadtarget=0
+
+# Only relay blocks, not transactions
 blocksonly=1
+
+# Amount of RAM allocated to the UTXO cache (in MiB)
 dbcache=${DBCACHE}
 
 # Disable wallet (not needed for feeder nodes)
 disablewallet=1
+
+# Network settings
+maxconnections=125
+port=8333
+
+# IMPORTANT: Replace with your actual public IP if behind NAT
+# The btc-externalip-updater service can manage this automatically if enabled
+externalip=CHANGEME
 EOF
 
     chown bitcoin:bitcoin /etc/bitcoin/bitcoin.conf
@@ -251,7 +242,7 @@ EOF
 
 systemctl daemon-reload
 systemctl enable bitcoind.service
-log "Systemd service installed (lighter version)."
+log "Systemd service installed and enabled."
 
 # ===================== FINAL PERMISSIONS & ALIAS =====================
 log "Setting final permissions..."
@@ -275,43 +266,191 @@ else
     log "btc alias already present"
 fi
 
+# ===================== INSTALL EXTERNAL IP UPDATER =====================
+log "Installing btc-externalip-updater script..."
+
+# Create the updater script
+cat > /usr/local/bin/btc-externalip-updater.sh << 'EOF'
+#!/bin/bash
+# btc-externalip-updater.sh - Bitcoin Feeder external IP updater
+
+if [[ $EUID -ne 0 ]]; then
+    echo "ERROR: This script must be run as root (or with sudo)" >&2
+    exit 1
+fi
+
+CONFIG_FILE="/etc/bitcoin/bitcoin.conf"
+LOG_FILE="/var/log/bitcoin/externalip-updater.log"
+SERVICE_NAME="bitcoind"
+
+PLACEHOLDER="CHANGEME" # Placeholder value replaced by updater on first run
+
+# ===================== CRON MANAGEMENT =====================
+if [[ "$1" == "--enable" ]]; then
+    echo "Enabling btc-externalip-updater cron job..."
+    crontab -l 2>/dev/null | grep -v "btc-externalip-updater.sh" > /tmp/crontab.tmp 2>/dev/null || true
+    echo "0 */6 * * * /usr/local/bin/btc-externalip-updater.sh >> /var/log/bitcoin/externalip-updater.log 2>&1" >> /tmp/crontab.tmp
+    crontab /tmp/crontab.tmp
+    rm -f /tmp/crontab.tmp
+    echo "Cron job enabled (runs every 6 hours)"
+    exit 0
+fi
+
+if [[ "$1" == "--disable" ]]; then
+    echo "Disabling btc-externalip-updater cron job..."
+    crontab -l 2>/dev/null | grep -v "btc-externalip-updater.sh" > /tmp/crontab.tmp 2>/dev/null || true
+    crontab /tmp/crontab.tmp
+    rm -f /tmp/crontab.tmp
+    echo "Cron job disabled successfully"
+    exit 0
+fi
+
+# ===================== NORMAL IP CHECK =====================
+# List of reliable IPv4 public IP providers (in order of preference)
+IP_PROVIDERS=(
+    "https://api.ipify.org"
+    "https://ifconfig.me"
+    "https://icanhazip.com"
+    "https://ipecho.net/plain"
+    "https://api-ipv4.ip.sb/ip"
+    "https://checkip.amazonaws.com"
+    "https://ipv4.seeip.org"
+    "https://ipv4.icanhazip.com"
+    "https://4.ifconfig.co"
+    "https://api.ip.sb/ip"
+    "https://ip4.me/api"
+)
+
+get_public_ip() {
+    for provider in "${IP_PROVIDERS[@]}"; do
+        IP=$(curl -s -m 10 -4 "$provider" 2>/dev/null | tr -d ' \n')
+        if [[ $IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "$IP"
+            return 0
+        else
+            log "Failed to get IP from $provider"
+        fi
+    done
+    echo ""
+}
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+}
+
+log "=== Starting external IP check ==="
+
+CURRENT_IP=$(get_public_ip)
+
+if [[ -z "$CURRENT_IP" ]]; then
+    log "ERROR: Could not detect public IPv4 address from any provider."
+    exit 1
+fi
+
+CONFIG_IP=$(grep -E '^externalip=' "$CONFIG_FILE" 2>/dev/null | cut -d'=' -f2 | tr -d ' ')
+
+log "Current public IPv4 : $CURRENT_IP"
+log "Config externalip   : ${CONFIG_IP:-NONE}"
+
+if [[ "$CURRENT_IP" != "$CONFIG_IP" ]]; then
+    log "IP changed. Updating bitcoin.conf..."
+
+    # Remove old externalip line and add the new one (no backup)
+    sed -i '/^externalip=/d' "$CONFIG_FILE"
+    echo "externalip=$CURRENT_IP" >> "$CONFIG_FILE"
+
+    log "Updated externalip=$CURRENT_IP"
+
+    # Skip restart if we just replaced the placeholder on first install
+    if [[ "$CONFIG_IP" == "$PLACEHOLDER" ]]; then
+        log "Placeholder (CHANGEME) replaced - skipping bitcoind restart on initial setup."
+    else
+        log "Restarting $SERVICE_NAME..."
+        systemctl restart "$SERVICE_NAME"
+
+        if systemctl is-active --quiet "$SERVICE_NAME"; then
+            log "SUCCESS: $SERVICE_NAME restarted with new IP."
+        else
+            log "ERROR: Failed to restart $SERVICE_NAME!"
+        fi
+    fi
+else
+    log "No change - public IP matches configuration."
+fi
+
+log "=== IP check completed ==="
+EOF
+
+# Set correct permissions
+chmod 755 /usr/local/bin/btc-externalip-updater.sh
+chown root:root /usr/local/bin/btc-externalip-updater.sh
+
+# Finalize External IP Updater
+log "Running btc-externalip-updater for the first time to detect and set externalip..."
+/usr/local/bin/btc-externalip-updater.sh
+
+log "Adding cron job using --enable parameter..."
+/usr/local/bin/btc-externalip-updater.sh --enable
+
+if [ $? -eq 0 ]; then
+    log "Cron job added successfully (runs every 6 hours)"
+else
+    log "WARNING: Failed to add cron job via --enable"
+fi
+
+log "External IP updater installation completed."
+
 # ===================== README =====================
 log "Creating system-wide documentation README..."
 mkdir -p /usr/local/share/doc
 
-cat > /usr/local/share/doc/bitcoin.txt << EOF
-# Bitcoin Core Feeder Node (Full Archival)
+cat > /usr/local/share/doc/bitcoin.txt << 'EOF'
+Bitcoin Feeder Node - Full Archival
 
-**Basic status:**
-- btc getblockchaininfo          # Show sync progress and block height
-- btc getnetworkinfo             # Show peer count and network status
-- btc getpeerinfo                # Detailed list of connected peers
-- btc getblockcount              # Get block count
-- btc getconnectioncount         # Show number of connections
+This is a dedicated high-capacity Bitcoin Feeder Node.
+It runs as a full archival node to "give back" to the Bitcoin network what regular SC Nodes "take".
+Note: Upload bandwidth is usually the main bottleneck.
 
-**Service & Logs**
-- systemctl status bitcoind      # Check if service is running
-- journalctl -u bitcoind -f      # Live tail of systemd logs
-- tail -n 100 /var/log/bitcoin/debug.log   # View recent debug log
+Quick Status Commands:
+- btc getblockchaininfo         # Show sync progress and current block height
+- btc getblockcount             # Quick current block count
+- btc getnetworkinfo            # Peer count, version, and network status
+- btc getpeerinfo               # Detailed list of connected peers
+- btc getconnectioncount        # Number of connected peers
 
-**Disk & Performance:**
-- df -h /var/lib/bitcoin         # Check disk usage
-- free -h                        # Check RAM usage
-- htop                           # CPU and memory usage
+Service Management:
+- systemctl status bitcoind                 # Check if the service is running
+- journalctl -u bitcoind -f                 # Live tail of logs
+- sudo systemctl restart bitcoind           # Restart after changing bitcoin.conf
+- tail -n 100 /var/log/bitcoin/debug.log    # View recent debug log
 
-**Advanced / Troubleshooting**
-- btc gettxoutsetinfo          # UTXO set size and stats
-- btc getmempoolinfo           # Mempool status
-- btc getconnectioncount       # Quick peer count
-- btc uptime                   # How long the node has been running
+Resource Monitoring:
+- df -h /var/lib/bitcoin        # Check blockchain disk usage
+- free -h                       # Check RAM usage
+- htop                          # CPU and memory usage
 
-## Key Paths
-- Config:          /etc/bitcoin/bitcoin.conf
-- Data:            /var/lib/bitcoin (full chain)
-- Log:             /var/log/bitcoin/debug.log
-- This Readme:     /usr/local/share/doc/bitcoin.txt
+Key Settings:
+- dbcache                       # Amount of RAM allocated for the UTXO cache (higher = faster validation)
+- externalip                    # Your public IP address. Change this if behind NAT or if your IP changes
+- port                          # Listening port. Change if running multiple nodes on the same network (same IP address)
+- maxconnections                # Maximum number of peer connections. Increase for better feeder performance. Warning, increase w/ caution!
+Note: Restart bitcoind after editing bitcoin.conf
+
+External IP Updater Script:
+Automatically checks the current public IPv4 4 times daily (enabled by default)
+If the IP differs from the one in bitcoin.conf, it updates the file and restarts Bitcoin Core
+- Location:         /usr/local/bin/btc-externalip-updater.sh
+- Manually run:     btc-externalip-updater.sh
+- Enable cron:      btc-externalip-updater.sh --enable
+- Disable cron:     btc-externalip-updater.sh --disable
+
+Key Paths:
+- Config file:      /etc/bitcoin/bitcoin.conf
+- Blockchain data:  /var/lib/bitcoin
+- Logs:             /var/log/bitcoin/debug.log
+- IP Updater Log:   /var/log/bitcoin/externalip-updater.log
 EOF
-log "Created README at /usr/local/share/doc/bitcoin.txt"
+log "Created feeder documentation at /usr/local/share/doc/bitcoin.txt"
 
 # Create symlink to README in bitcoin user's home directory
 ln -sfn /usr/local/share/doc/bitcoin.txt /home/bitcoin/readme.txt
