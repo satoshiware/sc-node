@@ -248,14 +248,6 @@ Important: Static public IPs are strongly recommended for all seeders. If the pu
 Note: The Primary Seeder is more tolerant of IP changes as it has no static inbound connection, assuming it uses dynamic DNS.
 
 ### Deployment Guideline:
-    Initial phase (first 5,000 SC Nodes): Deploy 1 seeder per 1,000 SC Nodes
-    Growth phase (up to 30,000 SC Nodes): Deploy 1 seeder per 2,500 SC Nodes
-    Mature phase (above 30,000 SC Nodes): Deploy 1 seeder per 5,000 SC Nodes
-Note: be sure to fan out to the max (8 per node) before going deeper.
-
-
-
-### Deployment Guideline:
 - **Lab / Early phase** (first 10 to 100 SC Nodes): Single Primary Seeder and one Supporting Seeder may share a single NAT'd internet connection w/ a non-static IP
 - **Initial phase** (first 5,000 SC Nodes): Deploy 1 seeder per 1,000 SC Nodes
 - **Growth phase** (up to 30,000 SC Nodes): Deploy 1 seeder per 2,500 SC Nodes
@@ -273,6 +265,7 @@ Now, just temporarily point your new SC Nodes to this local node using addnode.
 From time to time, avoid using the local node to bootstrap the new SC Nodes to test the Seeder Network.
 On initial boot, if you see no peers (azc getpeerinfo), restart the node with: `sudo systemctl restart azcoind`.
 If you still see no peers, there are issues. Time to troubleshoot your AZCoin Seeder Network.
+Note: If the SC Node is on the same extrenal IP as as the primary, it will not work. <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 ## Bitcoin Feeder / AZCoin Seeder Monitoring
 To confirm your AZCoin Seeder or Bitcoin Feeder is working as intended,
@@ -293,3 +286,7 @@ Suggested Alert Triggers:
 - Service is not running for ? minutes
 - Peer count drops to 0 for ? minutes
 - Node falls more than ? blocks behind
+
+
+
+
