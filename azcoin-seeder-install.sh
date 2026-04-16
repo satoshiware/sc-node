@@ -3,26 +3,31 @@ set -euo pipefail
 # =============================================================================
 # AZCoin Core Seeder Node Installation Script
 # =============================================================================
-# Purpose: AZCoin node designed to act as a reliable bootstrap and seeder for
-#          many SC Nodes on the AZCoin network.
-#          Target: 500 SC Nodes / 1 AZCoin Seeder Node
+# Purpose: AZCoin SEEDER node to help with bootstrapping and peer discovery of SC Nodes
 #
 # Key Characteristics:
-#   • Extra high connection count
-#   • blocks-only mode for better performance
-#   • Unlimited upload capacity
+#   • maxconnections=384
+#   • blocksonly=1
 #
 # Role in the Ecosystem:
-#   AZCoin seeder nodes are critical for new nodes to bootstrap and discover
-#   peers. They are added manually in their azcoin.conf files
+#   • Primary Seeder (1 only)
+#     Public entry point via DNS on port 19333
+#     Gossip disabled, short-lived connections only
+#
+#   • Supporting Seeders (many)
+#     The main bootstrapping workhorses of the network. They accept long-lived connections
+#     Deployed in larger numbers for redundancy
+#
+# Minimum deployment: 1 Primary + 1 Supporting Seeder
 #
 # Recommended hardware:
 #   - Fast CPU
 #   - At least 16 GB RAM (32 GB+ preferred)
-#   - Fast NVMe SSD (SECONDARY BOTTLENECK)
+#   - Fast NVMe SSD
 #   - Fastest available network connection (PRIMARY BOTTLENECK)
 #
 # This script is designed for Debian-based Linux distributions
+# See azcoin.txt file, prepared at bottom of this script, for more details
 # =============================================================================
 
 LOG_FILE="/var/log/azcoin-seeder-install.log"
@@ -38,33 +43,29 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-# ===================== SYSTEM UPDATE =====================
-log "Updating and upgrading system packages..."
-apt-get update -qq
-apt-get full-upgrade -y
-apt-get autoremove -y
-apt-get autoclean
-
-# ===================== PYTHON CHECK =====================
-if ! command -v python >/dev/null 2>&1; then
-    log "'python' command not found. Installing python-is-python3..."
-    apt-get install -y python-is-python3
-    if ! command -v python >/dev/null 2>&1; then
-        log "ERROR: Failed to install python-is-python3. Cannot continue."
-        exit 1
-    fi
-    log "'python' command successfully installed and linked to Python 3."
-elif ! python --version 2>&1 | grep -q "Python 3"; then
-    log "Warning: 'python' command exists but is not Python 3. Installing python-is-python3..."
-    apt-get install -y python-is-python3
-    if ! python --version 2>&1 | grep -q "Python 3"; then
-        log "ERROR: Still cannot get Python 3 via 'python' command."
-        exit 1
-    fi
-    log "'python' now correctly points to Python 3."
+# ===================== DETERMINE SEEDER MODE =====================
+if [[ "$1" == "--primary" ]]; then
+    IS_PRIMARY=true
+    log "=== Installing as PRIMARY SEEDER (via --primary flag) ==="
 else
-    log "'python' command points to Python 3. Good!"
+    IS_PRIMARY=false
+    log "=== Installing as SUPPORTING SEEDER (default mode) ==="
+
+    echo ""
+    echo "This is a SUPPORTING SEEDER installation."
+    echo "To install as Primary Seeder instead, rerun with:  ./azcoin-seeder-install.sh --primary"
+    echo ""
+    echo "Continuing in 3 seconds..."
+    sleep 3
 fi
+
+# ===================== SYSTEM UPDATE =====================
+log "Updating system packages and installing curl..."
+apt update -qq
+apt install -y curl
+apt full-upgrade -y
+apt autoremove -y
+apt autoclean -y
 
 # ===================== INTERACTIVE VERSION SELECTION =====================
 log "Fetching recent AZCoin releases..."
@@ -140,39 +141,26 @@ EXTRACTED_DIR=$(find "${TMP_EXTRACT}" -mindepth 1 -maxdepth 1 -type d | head -n 
 log "Installing binaries..."
 install -m 0755 -o root -g root "${EXTRACTED_DIR}/bin/azcoind"     /usr/local/bin/azcoind
 install -m 0755 -o root -g root "${EXTRACTED_DIR}/bin/azcoin-cli"  /usr/local/bin/azcoin-cli
-install -m 0755 -o root -g root "${EXTRACTED_DIR}/share/rpcauth/rpcauth.py" /usr/local/bin/rpcauth.py
 
-# ===================== INTERACTIVE DBCACHE SELECTION =====================
+# ===================== DBCACHE CALCULATION =====================
 TOTAL_RAM_GB=$(free --giga | awk '/^Mem:/ {print $2}' || echo "16")
-RESERVED_GB=8
-AVAILABLE_GB=$((TOTAL_RAM_GB - RESERVED_GB))
 
-log "Detected system RAM: ${TOTAL_RAM_GB} GB (reserving ${RESERVED_GB} GB for OS)"
+# Minimum 4 GB, target = Total RAM - 8 GB
+MIN_DBCACHE_GB=4
+TARGET_DBCACHE_GB=$((TOTAL_RAM_GB - 8))
 
-echo ""
-echo "Recommended dbcache (4 GB increments - aggressive for dedicated feeder):"
-for i in $(seq 4 $((AVAILABLE_GB / 4))); do
-    echo "   $((i*4)) GB"
-done
-echo ""
+# Ensure we never go below minimum
+if [[ $TARGET_DBCACHE_GB -lt $MIN_DBCACHE_GB ]]; then
+    DBCACHE_GB=$MIN_DBCACHE_GB
+else
+    DBCACHE_GB=$TARGET_DBCACHE_GB
+fi
 
-read -p "Enter dbcache value in GB [default: ${AVAILABLE_GB} ]: " DBCACHE_GB_INPUT
-DBCACHE_GB=${DBCACHE_GB_INPUT:-$AVAILABLE_GB}
+# Convert to MiB (what AZCoin Core expects)
 DBCACHE=$((DBCACHE_GB * 1024))
 
-log "Using dbcache=${DBCACHE} MB"
-
-# ===================== INTERACTIVE SEED NODE URL =====================
-echo ""; echo "Enter the AZCoin seed node URL (example: azcoin-seed.example.com:19333 [19333 is default port; it can be omitted])"
-echo "This will be added as 'addnode=' in /etc/azcoin/azcoin.conf"
-read -p "Seed node URL: " SEED_NODE
-
-# No default - require user to enter something
-if [[ -z "$SEED_NODE" ]]; then
-    echo ""; echo "ERROR: Seed node URL is required. Please run the script again."
-    exit 1
-fi
-log "Using seed node: $SEED_NODE"
+log "Detected system RAM: ${TOTAL_RAM_GB} GB"
+log "Setting dbcache = ${DBCACHE_GB} GB (${DBCACHE} MB)"
 
 # ===================== CONFIG =====================
 if [[ ! -f /etc/azcoin/azcoin.conf ]]; then
@@ -182,25 +170,54 @@ if [[ ! -f /etc/azcoin/azcoin.conf ]]; then
     chown azcoin:azcoin /etc/azcoin
     chmod 755 /etc/azcoin
 
-    cat > /etc/azcoin/azcoin.conf << EOF
-# AZCoin Seeder Node Configuration
+    if $IS_PRIMARY; then
+        EXTERNALIP_LINE="externalip=0.0.0.0"
+        HEADER="PRIMARY SEEDER"
+    else
+        EXTERNALIP_LINE="# externalip="
+        HEADER="SUPPORTING SEEDER"
+    fi
 
-# High-capacity listening seeder node
+    cat > /etc/azcoin/azcoin.conf << EOF
+# AZCoin ${HEADER} Node Configuration
+
+# Listening seeder node
 listen=1
 discover=1
-maxconnections=768       # High value for powerful dedicated server
-maxuploadtarget=0        # Unlimited upload - critical for seeder role
 
-# Performance settings
+# Unlimited upload - critical for seeder role
+maxuploadtarget=0
+
+# Only relay blocks, not transactions
 blocksonly=1
+
+# Amount of RAM allocated to the UTXO cache (in MiB)
 dbcache=${DBCACHE}
 
 # Disable wallet (not needed for seeder nodes)
 disablewallet=1
 
-# Connect to other known seeds
-# Note: May resolve to itself 1 out of N times and simply drop the connection attempt (where N = number of backend seeders)
-addnode=${SEED_NODE}
+# Network settings
+maxconnections=384
+
+# Primary Seeder: Must be the default port of 19333
+# Supporting Seeder: Can be most any number. If behind NAT, ensure internal and external port forward are the same
+port=19333
+
+# External IP (${HEADER}) configuration
+# Primary Seeder: 0.0.0.0 (Handicaps the Gossip Protocol)
+# Supporting Seeder: If behind NAT, uncomment and add external static IP
+${EXTERNALIP_LINE}
+
+# Fan-out to other seeders (maximum 8)
+addnode=
+addnode=
+addnode=
+addnode=
+addnode=
+addnode=
+addnode=
+addnode=
 EOF
 
     chown azcoin:azcoin /etc/azcoin/azcoin.conf
@@ -287,42 +304,98 @@ else
     log "azc alias already present"
 fi
 
+# ===================== INBOUND PROTECTION (PRIMARY SEEDER ONLY) =====================
+if $IS_PRIMARY; then
+    log "Installing Primary Seeder inbound protection (cron-based)..."
+
+    cat > /usr/local/bin/azcoin-primary-protect.sh << 'PROTECT'
+#!/usr/bin/env bash
+# Primary Seeder Protection: Kick after 3 minutes, ban for 7 days
+
+MAX_AGE=180      # 3 minutes
+BAN_TIME=604800  # 7 days
+
+peers=$(/usr/local/bin/azcoin-cli -conf=/etc/azcoin/azcoin.conf -datadir=/var/lib/azcoin getpeerinfo 2>/dev/null | \
+        jq -r '.[] | select(.inbound==true) | "\(.addr) \(.conntime)"' 2>/dev/null || true)
+
+while read -r addr conntime; do
+    [[ -z "$addr" ]] && continue
+    age=$(( $(date +%s) - conntime ))
+    if [[ $age -gt $MAX_AGE ]]; then
+        echo "[$(date)] Kicking old inbound: $addr (age ${age}s) → banning for 7 days"
+        /usr/local/bin/azcoin-cli -conf=/etc/azcoin/azcoin.conf -datadir=/var/lib/azcoin addnode "$addr" "remove" >/dev/null 2>&1 || true
+        /usr/local/bin/azcoin-cli -conf=/etc/azcoin/azcoin.conf -datadir=/var/lib/azcoin setban "$addr" "add" $BAN_TIME >/dev/null 2>&1 || true
+    fi
+done <<< "$peers"
+PROTECT
+
+    chmod +x /usr/local/bin/azcoin-primary-protect.sh
+
+    # Cron job every 2 minutes
+    crontab -l 2>/dev/null | grep -v "azcoin-primary-protect.sh" > /tmp/crontab.tmp 2>/dev/null || true
+    echo "*/2 * * * * /usr/local/bin/azcoin-primary-protect.sh >> /var/log/azcoin/protect.log 2>&1" >> /tmp/crontab.tmp
+    crontab /tmp/crontab.tmp
+    rm -f /tmp/crontab.tmp
+
+    log "Primary protection installed via cron (every 2 minutes)"
+fi
+
 # ===================== README =====================
 log "Creating system-wide documentation README..."
 mkdir -p /usr/local/share/doc
 
-cat > /usr/local/share/doc/azcoin.txt << 'EOF'
-# AZCoin Core Seeder Node
+cat > /usr/local/share/doc/azcoin-seeder.txt << EOF
+# AZCoin ${HEADER} Node
 
-**Basic status:**
+This is a dedicated high-capacity AZCoin ${HEADER} Node.
+It runs as a full archival node to help with bootstrapping and peer discovery of SC Nodes.
+Note: Upload bandwidth is usually the main bottleneck.
+
+Basic status:
 - azc getblockchaininfo        # Best overall command - shows sync progress
 - azc getblockcount            # Current block height
 - azc getpeerinfo              # List all connected peers
 - azc getnetworkinfo           # Network info and connection count
 - azc getconnectioncount       # Show number of connections
 
-**Service & Logs**
-- systemctl status azcoind     # Check if the service is running
-- journalctl -u azcoind -f     # Live tail of systemd logs
-- tail -n 100 /var/log/azcoin/debug.log   # View recent debug log
+Service Management:
+- systemctl status azcoind                  # Check if the service is running
+- journalctl -u azcoind -f                  # Live tail of systemd logs
+- sudo systemctl restart azcoind            # Restart after changing bitcoin.conf
+- tail -n 100 /var/log/azcoin/debug.log     # View recent debug log
 
-**Performance & Resources**
+Resource Monitoring:
 - free -h                      # RAM usage
 - df -h /var/lib/azcoin        # Disk usage
-- htop                         # CPU and memory usage
 
-**Advanced / Troubleshooting**
-- azc gettxoutsetinfo          # UTXO set size and stats
-- azc getmempoolinfo           # Mempool status
-- azc getconnectioncount       # Quick peer count
-- azc uptime                   # How long the node has been running
+Key Settings:
+- dbcache                       # Amount of RAM allocated for the UTXO cache (higher = faster validation)
+- externalip                    # Gossiped external ip (Must be 0.0.0.0 for Primary Seeder). Change this if behind NAT to your external static ip (Supporting Seeder nodes only)
+- port                          # Listening port: On Supporting Seeder nodes only, change if running multiple nodes on the same network (same IP address) and ensure internal and external port forwards are the same
+- maxconnections                # Maximum number of peer connections. If you must, decrease to reduce bandwidth usage.
+- addnode (x8)                  # Add other seeders (maximum 8)
+Note: Restart azcoind after editing azcoin.conf
 
-## Key Paths
-- Config:          /etc/azcoin/azcoin.conf
-- Data:            /var/lib/azcoin
-- Logs:            /var/log/azcoin/debug.log
-- Readme:          /usr/local/share/doc/azcoin.txt
+Key Paths:
+- Config file:      /etc/azcoin/azcoin.conf
+- Blockchain data:  /var/lib/azcoin
+- Logs:             /var/log/azcoin/debug.log
 EOF
+
+# Add Primary Seeder Only section conditionally
+if $IS_PRIMARY; then
+    cat >> /usr/local/share/doc/azcoin-seeder.txt << 'EOF2'
+
+Primary Seeder Only - Inbound Protection:
+- Script location: /usr/local/bin/azcoin-primary-protect.sh
+- Default settings:
+    MAX_AGE=180     # 3 minutes  (kicks inbound connections older than this)
+    BAN_TIME=604800 # 7 days     (bans offending IPs for this duration)
+- Runs via cron every 2 minutes
+- Log file: /var/log/azcoin/protect.log
+- To view or change the cron job: sudo crontab -e
+EOF2
+
 log "Created README at /usr/local/share/doc/azcoin.txt"
 
 # Create symlink to README in azcoin user's home directory

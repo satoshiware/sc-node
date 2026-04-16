@@ -120,7 +120,6 @@ EXTRACTED_DIR=$(find "${TMP_EXTRACT}" -mindepth 1 -maxdepth 1 -type d | head -n 
 log "Installing binaries..."
 install -m 0755 -o root -g root "${EXTRACTED_DIR}/bin/bitcoind"     /usr/local/bin/bitcoind
 install -m 0755 -o root -g root "${EXTRACTED_DIR}/bin/bitcoin-cli"  /usr/local/bin/bitcoin-cli
-install -m 0755 -o root -g root "${EXTRACTED_DIR}/share/rpcauth/rpcauth.py" /usr/local/bin/rpcauth.py
 
 # ===================== DBCACHE CALCULATION =====================
 TOTAL_RAM_GB=$(free --giga | awk '/^Mem:/ {print $2}' || echo "16")
@@ -174,10 +173,13 @@ disablewallet=1
 
 # Network settings
 maxconnections=125
+
+# Can be most any number. If behind NAT, ensure internal and external port forward are the same
 port=8333
 
-# IMPORTANT: Replace with your actual public IP if behind NAT
-# The btc-externalip-updater service can manage this automatically if enabled
+# Automatically updated via azcoin-externalip-updater.sh + cron
+# If this node is the terminating public static IP (not behind NAT), disable (recommended) the updater with: btc-externalip-updater.sh --disable
+# If behind NAT, but the external IP is static, you may optionally disable the updater
 externalip=CHANGEME
 EOF
 
@@ -404,7 +406,7 @@ log "External IP updater installation completed."
 log "Creating system-wide documentation README..."
 mkdir -p /usr/local/share/doc
 
-cat > /usr/local/share/doc/bitcoin.txt << 'EOF'
+cat > /usr/local/share/doc/bitcoin-feeder.txt << 'EOF'
 Bitcoin Feeder Node - Full Archival
 
 This is a dedicated high-capacity Bitcoin Feeder Node.
@@ -427,12 +429,11 @@ Service Management:
 Resource Monitoring:
 - df -h /var/lib/bitcoin        # Check blockchain disk usage
 - free -h                       # Check RAM usage
-- htop                          # CPU and memory usage
 
 Key Settings:
 - dbcache                       # Amount of RAM allocated for the UTXO cache (higher = faster validation)
 - externalip                    # Your public IP address. Change this if behind NAT or if your IP changes
-- port                          # Listening port. Change if running multiple nodes on the same network (same IP address)
+- port                          # Listening port. Change if running multiple nodes on the same network (same IP address) and ensure internal and external port forwards are the same
 - maxconnections                # Maximum number of peer connections. Increase for better feeder performance. Warning, increase w/ caution!
 Note: Restart bitcoind after editing bitcoin.conf
 
