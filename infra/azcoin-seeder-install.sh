@@ -12,7 +12,7 @@ set -euo pipefail
 # Role in the Ecosystem:
 #   • Primary Seeder (1 only)
 #     Public entry point via DNS on port 19333
-#     Gossip disabled, short-lived connections only
+#     Discovery disabled, short-lived connections only
 #
 #   • Supporting Seeders (many)
 #     The main bootstrapping workhorses of the network. They accept long-lived connections
@@ -177,9 +177,9 @@ if [[ ! -f /etc/azcoin/azcoin.conf ]]; then
     chmod 755 /etc/azcoin
 
     if $IS_PRIMARY; then
-        EXTERNALIP_LINE="externalip=0.0.0.0"
+        DISCOVER_SETTING="0"
     else
-        EXTERNALIP_LINE="# externalip="
+        DISCOVER_SETTING="1"
     fi
 
     cat > /etc/azcoin/azcoin.conf << EOF
@@ -187,7 +187,9 @@ if [[ ! -f /etc/azcoin/azcoin.conf ]]; then
 
 # Listening seeder node
 listen=1
-discover=1
+
+# Gossip Protocol enabled for Supporting Seeders only. Disable the Gossip Protocol for the Primary Seeder
+discover=${DISCOVER_SETTING}
 
 # Unlimited upload - critical for seeder role
 maxuploadtarget=0
@@ -208,20 +210,18 @@ maxconnections=384
 # Supporting Seeder: Can be most any number. If behind NAT, ensure internal and external port forward are the same
 port=19333
 
-# External IP (${HEADER}) configuration
-# Primary Seeder: 0.0.0.0 (Handicaps the Gossip Protocol)
-# Supporting Seeder: If behind NAT, uncomment and add external static IP
-${EXTERNALIP_LINE}
+# External IP configuration for Supporting Seeders only: If behind NAT, uncomment and add external static IP
+# externalip=
 
 # Fan-out to other seeders (maximum 8)
-addnode=
-addnode=
-addnode=
-addnode=
-addnode=
-addnode=
-addnode=
-addnode=
+# addnode=
+# addnode=
+# addnode=
+# addnode=
+# addnode=
+# addnode=
+# addnode=
+# addnode=
 EOF
 
     chown azcoin:azcoin /etc/azcoin/azcoin.conf
@@ -374,7 +374,7 @@ Resource Monitoring:
 
 Key Settings:
 - dbcache                       # Amount of RAM allocated for the UTXO cache (higher = faster validation)
-- externalip                    # Gossiped external ip (Must be 0.0.0.0 for Primary Seeder). Change this if behind NAT to your external static ip (Supporting Seeder nodes only)
+- externalip                    # If your Supporting Seeder is behind a NAT, set this to your external static ip (Supporting Seeder nodes only)
 - port                          # Listening port: On Supporting Seeder nodes only, change if running multiple nodes on the same network (same IP address) and ensure internal and external port forwards are the same
 - maxconnections                # Maximum number of peer connections. If you must, decrease to reduce bandwidth usage.
 - addnode (x8)                  # Add other seeders (maximum 8)
