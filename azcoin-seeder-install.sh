@@ -44,7 +44,7 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # ===================== DETERMINE SEEDER MODE =====================
-if [[ "$1" == "--primary" ]]; then
+if [[ "${1:-}" == "--primary" ]]; then
     IS_PRIMARY=true
     log "=== Installing as PRIMARY SEEDER (via --primary flag) ==="
 else
@@ -163,6 +163,12 @@ log "Detected system RAM: ${TOTAL_RAM_GB} GB"
 log "Setting dbcache = ${DBCACHE_GB} GB (${DBCACHE} MB)"
 
 # ===================== CONFIG =====================
+if $IS_PRIMARY; then
+    HEADER="PRIMARY SEEDER"
+else
+    HEADER="SUPPORTING SEEDER"
+fi
+
 if [[ ! -f /etc/azcoin/azcoin.conf ]]; then
     log "Creating azcoin.conf for seeder node..."
 
@@ -172,10 +178,8 @@ if [[ ! -f /etc/azcoin/azcoin.conf ]]; then
 
     if $IS_PRIMARY; then
         EXTERNALIP_LINE="externalip=0.0.0.0"
-        HEADER="PRIMARY SEEDER"
     else
         EXTERNALIP_LINE="# externalip="
-        HEADER="SUPPORTING SEEDER"
     fi
 
     cat > /etc/azcoin/azcoin.conf << EOF
@@ -395,7 +399,7 @@ Primary Seeder Only - Inbound Protection:
 - Log file: /var/log/azcoin/protect.log
 - To view or change the cron job: sudo crontab -e
 EOF2
-
+fi
 log "Created README at /usr/local/share/doc/azcoin.txt"
 
 # Create symlink to README in azcoin user's home directory
