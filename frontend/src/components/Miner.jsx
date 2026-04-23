@@ -639,23 +639,21 @@ export default function Miner({ setView, user }) {
                 </div>
               </div>
 
-              {/* Average hashrate */}
+              {/* Best diff / blocks found */}
               <div className="bg-gray-800/80 border border-gray-700 rounded-lg p-4 space-y-2">
                 <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">
-                  Average Hashrate
+                  Mining Stats
                 </div>
                 <div className="flex items-baseline justify-between gap-4">
                   <div>
-                    <div className="text-xs text-gray-400 mb-0.5">1 Hour</div>
+                    <div className="text-xs text-gray-400 mb-0.5">best_diff (Highest Share Difficulty)</div>
                     <div className="text-lg sm:text-xl font-semibold text-white">
-                      {formatDec(hash60m, 3)} <span className="text-xs text-gray-400 font-normal">{displayHashrateUnit}</span>
+                      {formatDec(4812121.210808747, 6)}
                     </div>
                   </div>
                   <div>
-                    <div className="text-xs text-gray-400 mb-0.5">24 Hours</div>
-                    <div className="text-lg sm:text-xl font-semibold text-white">
-                      {formatDec(hash24h, 3)} <span className="text-xs text-gray-400 font-normal">{displayHashrateUnit}</span>
-                    </div>
+                    <div className="text-xs text-gray-400 mb-0.5">blocks_found</div>
+                    <div className="text-lg sm:text-xl font-semibold text-white">0</div>
                   </div>
                 </div>
               </div>
