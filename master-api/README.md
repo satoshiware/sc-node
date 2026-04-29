@@ -1,4 +1,4 @@
-# azcoin-node-api (FastAPI)
+# master-api (FastAPI)
 
 Production-ready skeleton for **0.2.0**.
 
