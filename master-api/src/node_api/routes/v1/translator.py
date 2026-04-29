@@ -1,0 +1,468 @@
+from __future__ import annotations
+
+import re
+from typing import Any, Literal
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, ConfigDict, Field
+
+from node_api.services import translator_blocks_found_store as tbfs
+from node_api.services import translator_logs as tl
+from node_api.services import translator_miner_work as tmw
+from node_api.services import translator_monitoring as tm
+from node_api.settings import Settings, get_settings
+
+router = APIRouter(prefix="/translator", tags=["translator"])
+
+_SUMMARY_DEFAULT_LINES = 500
+_SUMMARY_MAX_LINES = 2000
+_BLOCKS_FOUND_INTERVAL_RULE = "start_time <= detected_time < end_time"
+
+_CLIENT_ID_RE = re.compile(r"^[\w.-]{1,128}$")
+
+
+class TranslatorLogRecordOut(BaseModel):
+    """Normalized translator log line (plain or JSON-derived)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ts: str
+    level: str
+    target: str
+    category: str
+    message: str
+    raw: str
+
+
+class TranslatorStatusOut(BaseModel):
+    """Merged translator health: log tail signals plus live monitoring probe."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok", "degraded", "unconfigured"]
+    configured: bool
+    log_configured: bool
+    monitoring_configured: bool
+    log_status: Literal["ok", "degraded", "unconfigured"]
+    monitoring_status: Literal["ok", "degraded", "unconfigured"]
+    last_event_ts: str | None = None
+    recent_error_count: int = 0
+    upstream_channels: int | None = None
+    downstream_clients: int | None = None
+    log_path: str | None = None
+
+
+class TranslatorSummaryOut(BaseModel):
+    """Status plus aggregates over the last ``lines`` parsed log records."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok", "degraded", "unconfigured"]
+    configured: bool
+    log_path: str | None = None
+    exists: bool = False
+    readable: bool = False
+    total_records_scanned: int = 0
+    counts_by_level: dict[str, int] = Field(default_factory=dict)
+    counts_by_category: dict[str, int] = Field(default_factory=dict)
+    last_event_ts: str | None = None
+    recent_error_count: int = 0
+
+
+class TranslatorMonitoringResponse(BaseModel):
+    """Allowlisted translator monitoring HTTP GET result (normalized envelope)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok", "degraded", "unconfigured"]
+    configured: bool
+    data: dict[str, Any] | list[Any] | None = None
+    detail: str | None = None
+
+
+class MinerWorkSnapshotItem(BaseModel):
+    """One channel-keyed row of the joined miner-work snapshot.
+
+    Field-by-field provenance is documented in
+    ``services/translator_miner_work.py``. The numeric-string fields
+    (share_work_sum, best_diff, hashrate, nominal_hashrate) are intentional:
+    downstream ledger arithmetic must use Decimal / arbitrary-width int math
+    and never IEEE-754 float.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    channel_id: int
+    client_id: int | None = None
+
+    worker_identity: str | None = None
+    authorized_worker_name: str | None = None
+    downstream_user_identity: str | None = None
+    upstream_user_identity: str | None = None
+
+    shares_acknowledged: int | None = None
+    shares_submitted: int | None = None
+    shares_rejected: int | None = None
+
+    share_work_sum: str | None = None
+    best_diff: str | None = None
+    blocks_found: int | None = None
+
+    hashrate: str | None = None
+    nominal_hashrate: str | None = None
+
+    downstream_target_hex: str | None = None
+    upstream_target_hex: str | None = None
+
+    extranonce1_hex: str | None = None
+    extranonce_prefix_hex: str | None = None
+    extranonce2_len: int | None = None
+    full_extranonce_size: int | None = None
+    rollable_extranonce_size: int | None = None
+
+    version_rolling: bool | None = None
+    version_rolling_mask: str | None = None
+    version_rolling_min_bit: str | None = None
+
+    join_status: Literal["joined", "downstream_only", "upstream_only"]
+
+
+class MinerWorkSnapshotData(BaseModel):
+    """``data`` payload of the miner-work snapshot response."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    total: int
+    items: list[MinerWorkSnapshotItem]
+
+
+class MinerWorkSnapshotResponse(BaseModel):
+    """Top-level envelope for ``GET /v1/translator/miner-work/snapshot``.
+
+    ``snapshot_time`` is Unix seconds at the moment the join was assembled,
+    or ``null`` when the snapshot is not actually fresh (translator
+    unconfigured or fail-closed degraded). ``source`` is fixed to
+    ``"translator"`` -- a future revision may add other sources, but for
+    now this lets ledger consumers attribute the row deterministically.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok", "degraded", "unconfigured"]
+    configured: bool
+    snapshot_time: int | None = None
+    source: Literal["translator"]
+    data: MinerWorkSnapshotData
+    detail: str | None = None
+
+
+class TranslatorBlocksFoundEventItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    detected_time: int
+    detected_time_iso: str
+    channel_id: int
+    worker_identity: str
+    authorized_worker_name: str | None = None
+    downstream_user_identity: str | None = None
+    upstream_user_identity: str | None = None
+    blocks_found_before: int
+    blocks_found_after: int
+    blocks_found_delta: int
+    share_work_sum_at_detection: str | None = None
+    shares_acknowledged_at_detection: int | None = None
+    shares_submitted_at_detection: int | None = None
+    shares_rejected_at_detection: int | None = None
+    blockhash: str | None = None
+    blockhash_status: str
+    correlation_status: str
+
+
+class TranslatorBlocksFoundTimeFilter(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    start_time: int | None = None
+    end_time: int | None = None
+    time_field: Literal["detected_time"]
+    interval_rule: str
+
+
+class TranslatorBlocksFoundResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"]
+    source: Literal["translator_blocks_found_events"]
+    total: int
+    time_filter: TranslatorBlocksFoundTimeFilter
+    items: list[TranslatorBlocksFoundEventItem]
+
+
+def _clamp_lines(lines: int, settings: Settings) -> int:
+    return max(1, min(lines, settings.translator_log_max_lines))
+
+
+def _clamp_limit(limit: int) -> int:
+    return max(1, min(limit, 1000))
+
+
+def _clamp_summary_lines(lines: int) -> int:
+    return max(1, min(lines, _SUMMARY_MAX_LINES))
+
+
+def _records_to_out(records: list[tl.TranslatorLogRecord]) -> list[TranslatorLogRecordOut]:
+    return [TranslatorLogRecordOut.model_validate(r.to_dict()) for r in records]
+
+
+def _monitoring_envelope(raw: dict[str, Any]) -> TranslatorMonitoringResponse:
+    return TranslatorMonitoringResponse.model_validate(raw)
+
+
+def _raise_blocks_found_time_range_invalid() -> None:
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "code": "TRANSLATOR_BLOCKS_FOUND_TIME_RANGE_INVALID",
+            "message": "end_time must be strictly greater than start_time.",
+        },
+    )
+
+
+@router.get("/status", response_model=TranslatorStatusOut)
+def translator_status(settings: Settings = Depends(get_settings)) -> TranslatorStatusOut:
+    return TranslatorStatusOut.model_validate(tm.translator_merged_status_payload(settings))
+
+
+@router.get("/summary", response_model=TranslatorSummaryOut)
+def translator_summary(
+    settings: Settings = Depends(get_settings),
+    lines: int = Query(default=_SUMMARY_DEFAULT_LINES, ge=1, le=_SUMMARY_MAX_LINES),
+) -> TranslatorSummaryOut:
+    want = _clamp_summary_lines(lines)
+    return TranslatorSummaryOut.model_validate(tl.translator_summary_payload(settings, want))
+
+
+@router.get("/runtime", response_model=TranslatorMonitoringResponse, deprecated=True)
+def translator_runtime(settings: Settings = Depends(get_settings)) -> TranslatorMonitoringResponse:
+    """Deprecated: raw translator-monitoring passthrough.
+
+    Operators should prefer ``GET /v1/translator/status`` (merged service
+    health) and ``GET /v1/translator/miner-work/snapshot`` (ledger-ready
+    join). This route is retained for diagnostics only and may be removed
+    in a future release.
+    """
+    return _monitoring_envelope(tm.fetch_allowlisted(settings, "/api/v1/health", None))
+
+
+@router.get("/global", response_model=TranslatorMonitoringResponse, deprecated=True)
+def translator_global(settings: Settings = Depends(get_settings)) -> TranslatorMonitoringResponse:
+    """Deprecated: raw translator-monitoring passthrough.
+
+    Prefer ``GET /v1/translator/status`` and
+    ``GET /v1/translator/miner-work/snapshot``. Diagnostic-only.
+    """
+    return _monitoring_envelope(tm.fetch_allowlisted(settings, "/api/v1/global", None))
+
+
+@router.get("/upstream", response_model=TranslatorMonitoringResponse, deprecated=True)
+def translator_upstream(settings: Settings = Depends(get_settings)) -> TranslatorMonitoringResponse:
+    """Deprecated: raw translator-monitoring passthrough.
+
+    Prefer ``GET /v1/translator/miner-work/snapshot`` for the joined,
+    ledger-ready upstream channel view. Diagnostic-only.
+    """
+    return _monitoring_envelope(tm.fetch_allowlisted(settings, "/api/v1/server", None))
+
+
+@router.get("/upstream/channels", response_model=TranslatorMonitoringResponse, deprecated=True)
+def translator_upstream_channels(
+    settings: Settings = Depends(get_settings),
+) -> TranslatorMonitoringResponse:
+    """Deprecated: raw translator-monitoring passthrough.
+
+    Prefer ``GET /v1/translator/miner-work/snapshot`` which already joins
+    these channel counters with downstream miner identity. Diagnostic-only.
+    """
+    return _monitoring_envelope(tm.fetch_allowlisted(settings, "/api/v1/server/channels", None))
+
+
+@router.get("/miner-work/snapshot", response_model=MinerWorkSnapshotResponse)
+def translator_miner_work_snapshot(
+    settings: Settings = Depends(get_settings),
+) -> MinerWorkSnapshotResponse:
+    """Normalized join of upstream channel counters with downstream miner identity.
+
+    Truth role: TRANSLATOR LOCAL-WORK TRUTH (see
+    ``docs/api/ledger-mvp-endpoints.md`` section 1.2). This endpoint is the
+    single stable shape that the future ledger interval-snapshot endpoints
+    will read from; do not have ledger code re-implement the join over the
+    raw ``/downstreams`` and ``/upstream/channels`` passthroughs.
+
+    Fail-closed: if exactly one of the two raw fetches succeeds, the
+    response is ``status: degraded`` with an empty items list rather than
+    half-joined data.
+    """
+    return MinerWorkSnapshotResponse.model_validate(
+        tmw.build_miner_work_snapshot(settings)
+    )
+
+
+@router.get("/blocks-found", response_model=TranslatorBlocksFoundResponse)
+def translator_blocks_found(
+    settings: Settings = Depends(get_settings),
+    start_time: int | None = Query(default=None, ge=0),
+    end_time: int | None = Query(default=None, ge=0),
+    limit: int = Query(default=100, ge=1, le=1000),
+    worker_identity: str | None = Query(default=None),
+    channel_id: int | None = Query(default=None),
+    blockhash_status: str | None = Query(default=None),
+) -> TranslatorBlocksFoundResponse:
+    """Durable translator block-found counter-delta evidence.
+
+    This route exposes persisted counter-delta observations from the
+    translator poller. It is evidence that a translator-side
+    ``blocks_found`` counter increased for a worker identity; it does not
+    prove chain inclusion, reward maturity, payout eligibility, or wallet
+    movement. Ledger code must still verify rewards through
+    ``/v1/az/blocks/rewards``.
+    """
+    if (
+        start_time is not None
+        and end_time is not None
+        and end_time <= start_time
+    ):
+        _raise_blocks_found_time_range_invalid()
+
+    store = tbfs.TranslatorBlocksFoundStore.from_settings(settings)
+    total, items = store.list_events(
+        start_time=start_time,
+        end_time=end_time,
+        limit=limit,
+        worker_identity=worker_identity,
+        channel_id=channel_id,
+        blockhash_status=blockhash_status,
+    )
+    return TranslatorBlocksFoundResponse.model_validate(
+        {
+            "status": "ok",
+            "source": "translator_blocks_found_events",
+            "total": total,
+            "time_filter": {
+                "start_time": start_time,
+                "end_time": end_time,
+                "time_field": "detected_time",
+                "interval_rule": _BLOCKS_FOUND_INTERVAL_RULE,
+            },
+            "items": items,
+        }
+    )
+
+
+@router.get("/downstreams", response_model=TranslatorMonitoringResponse, deprecated=True)
+def translator_downstreams(
+    settings: Settings = Depends(get_settings),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=500),
+) -> TranslatorMonitoringResponse:
+    """Deprecated: raw translator-monitoring passthrough.
+
+    Prefer ``GET /v1/translator/miner-work/snapshot`` which joins downstream
+    SV1 miner identity with upstream SV2 channel counters. Diagnostic-only.
+    """
+    return _monitoring_envelope(
+        tm.fetch_allowlisted(settings, "/api/v1/sv1/clients", {"offset": offset, "limit": limit})
+    )
+
+
+@router.get(
+    "/downstreams/{client_id}",
+    response_model=TranslatorMonitoringResponse,
+    deprecated=True,
+)
+def translator_downstream_client(
+    client_id: str,
+    settings: Settings = Depends(get_settings),
+) -> TranslatorMonitoringResponse:
+    """Deprecated: raw translator-monitoring passthrough.
+
+    Prefer ``GET /v1/translator/miner-work/snapshot`` for stable miner-identity
+    joins. Diagnostic-only.
+    """
+    if not _CLIENT_ID_RE.fullmatch(client_id):
+        if not tm.is_monitoring_configured(settings):
+            return TranslatorMonitoringResponse(
+                status="unconfigured",
+                configured=False,
+                data=None,
+                detail="invalid_client_id",
+            )
+        return TranslatorMonitoringResponse(
+            status="degraded",
+            configured=True,
+            data=None,
+            detail="invalid_client_id",
+        )
+    path = f"/api/v1/sv1/clients/{client_id}"
+    return _monitoring_envelope(tm.fetch_allowlisted(settings, path, None))
+
+
+@router.get("/logs/tail", response_model=list[TranslatorLogRecordOut])
+def translator_logs_tail(
+    settings: Settings = Depends(get_settings),
+    lines: int | None = Query(default=None, ge=1),
+    level: str | None = Query(default=None),
+    contains: str | None = Query(default=None),
+) -> list[TranslatorLogRecordOut]:
+    path = tl.translator_log_path(settings)
+    if path is None:
+        return []
+    exists, readable = tl.path_readable_file(path)
+    if not exists or not readable:
+        return []
+
+    want_lines = lines if lines is not None else settings.translator_log_default_lines
+    want_lines = _clamp_lines(want_lines, settings)
+    records = tl.load_tail_records(path, want_lines)
+    ordered = tl.newest_first(records)
+    filtered = tl.filter_records(ordered, level=level, contains=contains)
+    return _records_to_out(filtered)
+
+
+@router.get("/events/recent", response_model=list[TranslatorLogRecordOut])
+def translator_events_recent(
+    settings: Settings = Depends(get_settings),
+    limit: int = Query(default=100, ge=1),
+    category: str | None = Query(default=None),
+    level: str | None = Query(default=None),
+    contains: str | None = Query(default=None),
+) -> list[TranslatorLogRecordOut]:
+    path = tl.translator_log_path(settings)
+    if path is None:
+        return []
+    exists, readable = tl.path_readable_file(path)
+    if not exists or not readable:
+        return []
+
+    lim = _clamp_limit(limit)
+    records = tl.load_tail_records(path, settings.translator_log_max_lines)
+    ordered = tl.newest_first(records)
+    filtered = tl.filter_records(ordered, level=level, contains=contains, category=category)
+    return _records_to_out(filtered[:lim])
+
+
+@router.get("/errors/recent", response_model=list[TranslatorLogRecordOut])
+def translator_errors_recent(
+    settings: Settings = Depends(get_settings),
+    limit: int = Query(default=100, ge=1),
+) -> list[TranslatorLogRecordOut]:
+    path = tl.translator_log_path(settings)
+    if path is None:
+        return []
+    exists, readable = tl.path_readable_file(path)
+    if not exists or not readable:
+        return []
+
+    lim = _clamp_limit(limit)
+    records = tl.load_tail_records(path, settings.translator_log_max_lines)
+    ordered = tl.newest_first(records)
+    errs = [r for r in ordered if r.level in ("ERROR", "WARN")]
+    return _records_to_out(errs[:lim])
