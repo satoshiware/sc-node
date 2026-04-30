@@ -11,13 +11,8 @@ $SHA = (git rev-parse --short HEAD).Trim()
 $SHA = (git rev-parse --short HEAD).Trim()
 
 docker build `
-  -t ghcr.io/satoshiware/azcoin-node-api:sha-$SHA `
-  -t ghcr.io/satoshiware/azcoin-node-api:v0.2.0`
-  -t ghcr.io/satoshiware/azcoin-node-api:stable `
-  -t ghcr.io/satoshiware/azcoin-node-api:latest `
-  .
+  -t ghcr.io/satoshiware/sc-node/master-api:latest:sha-$SHA `
+  -t ghcr.io/satoshiware/sc-node/master-api:v0.2.0`.
 
-docker push ghcr.io/satoshiware/azcoin-node-api:sha-$SHA
-docker push ghcr.io/satoshiware/azcoin-node-api:latest
-docker push ghcr.io/satoshiware/azcoin-node-api:v0.2.0
-docker push ghcr.io/satoshiware/azcoin-node-api:stable
+docker push ghcr.io/satoshiware/sc-node/master-api:latest:sha-$SHA
+docker push ghcr.io/satoshiware/sc-node/master-api:v0.2.0
