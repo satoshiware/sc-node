@@ -6,6 +6,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
+from node_api.services import translator_blocks_found_candidates as tbfc
 from node_api.services import translator_blocks_found_store as tbfs
 from node_api.services import translator_logs as tl
 from node_api.services import translator_miner_work as tmw
@@ -178,6 +179,29 @@ class TranslatorBlocksFoundEventItem(BaseModel):
     correlation_status: str
 
 
+class TranslatorBlocksFoundCandidateBlock(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    height: int | None = None
+    blockhash: str | None = None
+    time: int | None = None
+    mediantime: int | None = None
+    selected_time: int
+    signed_delta_seconds: int
+    abs_delta_seconds: int
+    coinbase_total_sats: int | None = None
+    maturity_status: str | None = None
+    confirmations: int | None = None
+
+
+class TranslatorBlocksFoundCandidateEventItem(TranslatorBlocksFoundEventItem):
+    candidate_window_seconds: int
+    candidate_time_field: Literal["time", "mediantime"]
+    candidate_count: int
+    nearest_candidate_blockhash: str | None = None
+    candidate_blocks: list[TranslatorBlocksFoundCandidateBlock]
+
+
 class TranslatorBlocksFoundTimeFilter(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -195,6 +219,16 @@ class TranslatorBlocksFoundResponse(BaseModel):
     total: int
     time_filter: TranslatorBlocksFoundTimeFilter
     items: list[TranslatorBlocksFoundEventItem]
+
+
+class TranslatorBlocksFoundCandidatesResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"]
+    source: Literal["translator_blocks_found_events"]
+    total: int
+    time_filter: TranslatorBlocksFoundTimeFilter
+    items: list[TranslatorBlocksFoundCandidateEventItem]
 
 
 def _clamp_lines(lines: int, settings: Settings) -> int:
@@ -306,7 +340,10 @@ def translator_miner_work_snapshot(
     )
 
 
-@router.get("/blocks-found", response_model=TranslatorBlocksFoundResponse)
+@router.get(
+    "/blocks-found",
+    response_model=TranslatorBlocksFoundResponse | TranslatorBlocksFoundCandidatesResponse,
+)
 def translator_blocks_found(
     settings: Settings = Depends(get_settings),
     start_time: int | None = Query(default=None, ge=0),
@@ -315,7 +352,11 @@ def translator_blocks_found(
     worker_identity: str | None = Query(default=None),
     channel_id: int | None = Query(default=None),
     blockhash_status: str | None = Query(default=None),
-) -> TranslatorBlocksFoundResponse:
+    include_candidate_blocks: bool = Query(default=False),
+    candidate_window_seconds: int = Query(default=30, ge=1, le=3600),
+    candidate_time_field: Literal["time", "mediantime"] = Query(default="time"),
+    candidate_limit_per_event: int = Query(default=10, ge=1, le=50),
+) -> dict[str, Any]:
     """Durable translator block-found counter-delta evidence.
 
     This route exposes persisted counter-delta observations from the
@@ -341,6 +382,28 @@ def translator_blocks_found(
         channel_id=channel_id,
         blockhash_status=blockhash_status,
     )
+    if include_candidate_blocks:
+        items = tbfc.enrich_events_with_candidate_blocks(
+            items,
+            candidate_window_seconds=candidate_window_seconds,
+            candidate_time_field=candidate_time_field,
+            candidate_limit_per_event=candidate_limit_per_event,
+        )
+        return TranslatorBlocksFoundCandidatesResponse.model_validate(
+            {
+                "status": "ok",
+                "source": "translator_blocks_found_events",
+                "total": total,
+                "time_filter": {
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "time_field": "detected_time",
+                    "interval_rule": _BLOCKS_FOUND_INTERVAL_RULE,
+                },
+                "items": items,
+            }
+        ).model_dump()
+
     return TranslatorBlocksFoundResponse.model_validate(
         {
             "status": "ok",
@@ -354,7 +417,7 @@ def translator_blocks_found(
             },
             "items": items,
         }
-    )
+    ).model_dump()
 
 
 @router.get("/downstreams", response_model=TranslatorMonitoringResponse, deprecated=True)

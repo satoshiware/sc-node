@@ -456,6 +456,12 @@ The endpoint inherits the translator passthrough error model:
   separate poller process that repeatedly reads
   `/v1/translator/miner-work/snapshot` and persists every positive
   `blocks_found` counter delta for a stable miner identity.
+- **Optional diagnostic enrichment:** when
+  `include_candidate_blocks=true`, the route may attach nearby
+  chain-reward block candidates selected from a single combined
+  `/v1/az/blocks/rewards` time-window lookup across all returned
+  events. These candidate rows are **supplemental diagnostic evidence
+  only**.
 - **Source:** this API's SQLite store at
   `TRANSLATOR_BLOCKS_FOUND_DB_PATH`, populated by
   `python -m node_api.services.translator_blocks_found_poller`.
@@ -466,6 +472,10 @@ The endpoint inherits the translator passthrough error model:
   inclusion, block reward maturity, payout eligibility, wallet
   movement, or an exact blockhash. The ledger must still verify rewards
   through `/v1/az/blocks/rewards`.
+- **Exact-evidence rule:** `blockhash` remains reserved for exact
+  verified blockhash evidence from the translator / pool path. A
+  time-window candidate match must never make `blockhash` non-null by
+  itself.
 - **Identity rule:** `worker_identity` / `authorized_worker_name` is the
   miner identity. `channel_id` is metadata only and must not be used as
   payout identity because reconnects can move the same miner to a new
@@ -474,6 +484,13 @@ The endpoint inherits the translator passthrough error model:
   `counter_delta_only`; `blockhash` remains null and
   `blockhash_status="unresolved"` unless direct evidence is added in a
   later revision.
+- **Candidate block rule:** `candidate_blocks` are time-window matches
+  on chain reward truth and must not be treated as payout proof or
+  settlement truth. Operators may use them for review, but ledger
+  settlement must still wait for future exact evidence.
+- **Candidate count rule:** `candidate_count` reflects the full number
+  of time-window matches before any per-event `candidate_limit_per_event`
+  truncation is applied.
 
 ---
 
