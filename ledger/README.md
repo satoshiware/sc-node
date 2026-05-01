@@ -10,7 +10,8 @@ Initial scaffold for reward collection and payout settlement service.
 2. Install dependencies:
    - `pip install -r requirements.txt`
 3. Create env file:
-   - `touch .env` (if missing) and set required values
+   - `cp .env.example .env`
+   - Edit `.env` and set required values for your environment
 4. Start API:
    - `uvicorn app.main:app --reload`
 
