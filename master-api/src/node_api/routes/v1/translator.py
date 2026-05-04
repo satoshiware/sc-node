@@ -192,6 +192,7 @@ class TranslatorBlocksFoundCandidateBlock(BaseModel):
     coinbase_total_sats: int | None = None
     maturity_status: str | None = None
     confirmations: int | None = None
+    is_on_main_chain: bool | None = None
 
 
 class TranslatorBlocksFoundCandidateEventItem(TranslatorBlocksFoundEventItem):
@@ -199,6 +200,10 @@ class TranslatorBlocksFoundCandidateEventItem(TranslatorBlocksFoundEventItem):
     candidate_time_field: Literal["time", "mediantime"]
     candidate_count: int
     nearest_candidate_blockhash: str | None = None
+    maturity_required: int | None = None
+    candidate_confirmations: int | None = None
+    candidate_coinbase_total_sats: int | None = None
+    payout_ready: bool
     candidate_blocks: list[TranslatorBlocksFoundCandidateBlock]
 
 
