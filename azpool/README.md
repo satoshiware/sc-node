@@ -12,14 +12,14 @@ It is a **headless** backend system (no GUI) designed to serve as the core infra
 | Connectivity        | Between All Machines | Secure Encrypted Tunnel                            | WireGuard VPN                                    |
 ---
 ### 2. Mining Hierarchy & Management
-| Layer            | Description                                                                             | Managed By      | Connection Type        |
-|------------------|-----------------------------------------------------------------------------------------|-----------------|------------------------|
-| Pool Miners      | Individual miners connecting directly to the pool.                                      | Pool Instances  | Stratum V1             |
-|                  | Mainly for testing purposes, not intended for continuous use but it can be.             |                 |                        |
-| SC Node Miners   | Individual miners connecting to SC Nodes                                                | SC Nodes        | Stratum V1             |
-| SC Nodes         | Nodes that run SV1 → SV2 translators for groups of miners                               | SC Node Owner   | Stratum V1/V2 (In/Out) |
-| SC Node Backend  | API service the SC Nodes use to change their mining payout address.                     | Cluster Admin   | WireGuard VPN          |
-|                  | The API updates its internal database and forwards changes to the Pool's Payout Engine. |                 |                        |
+| Layer             | Description                                                                             | Managed By      | Connection Type        |
+|-------------------|-----------------------------------------------------------------------------------------|-----------------|------------------------|
+| Pool Miners       | Individual miners connecting directly to the pool (via the Pool translator).            | Pool Instances  | Stratum V1             |
+|                   | Mainly for testing purposes, not intended for continuous use but it can be.             |                 |                        |
+| SC Node Miners    | Individual miners connecting to SC Nodes                                                | SC Nodes        | Stratum V1             |
+| SC Nodes          | Nodes that run SV1 → SV2 translators for groups of miners                               | SC Node Owner   | Stratum V1/V2 (In/Out) |
+| "SC Node Backend" | API service the SC Nodes use to change their mining payout address.                     | Cluster Admin   | WireGuard VPN          |
+|                   | The API updates its internal database and forwards changes to the Pool's Payout Engine. |                 |                        |
 ---
 ## Installation Scripts & Configuration
 Major settings for the installation are stored in two `.env` files:
@@ -38,7 +38,7 @@ Verify all download URLs, hashes, and signatures. Adjust ports, credentials, set
 | `azcoin-install.azpool.sh`    | Installs AZCoin Core                      |        —          |
 | `templar-install.sh`          | Installs SV2 Template Provider            |        —          |
 | `payouts-install.azpool.sh`   | Installs Payout Engine for AZ Pool        |        —          |
-> Also installs/configures WireGuard, UFW firewall, etc.
+> Also installs/configures SSH, UFW firewall, WireGuard, etc.
 ---
 ### Pool Instance
 | Script                          | Purpose                                 | Calls / Installs  |
@@ -47,15 +47,6 @@ Verify all download URLs, hashes, and signatures. Adjust ports, credentials, set
 | `azpool-install.sh`             | Installs the SV2 Pool                   |        —          |
 | `translator-install.azcoin.sh`  | Installs the Pool Level Translator      |        —          |
 > Also installs/configures WireGuard, UFW firewall, Coinbase Updater Script, etc.
----
-### Configuration Files
-Major settings for the installation are stored in two `.env` files:
-- `azpool-backend.env` — Configuration for the Pool Backend
-- `azpool-instance.env` — Configuration for each Pool Instance
-
-These files are loaded automatically by the setup scripts.
-**Please review both files carefully before running the installers.**
-Verify all download URLs, hashes, and signatures. Adjust ports, credentials, settings, and any other values as desired.
 ---
 ## Data Flow & Security
 Communication between Pool/SC-Node Miners, SC Node Translators, The Pool Translator, and Pool Instances uses the standard Stratum V1 (SV1) and Stratum V2 (SV2) protocols.
@@ -96,11 +87,41 @@ It is custom-built for this AZCoin pool.
 Repository Location: `sc-node/azpool/templar/`
 Binrary Location: [sc-node releases](https://github.com/satoshiware/sc-node/releases)
 
+# AZPool Backend Installation !!!!!!!!!!!!!! (TODO: REVISIT LATER AFTER RELEASE, INSTALLATION, FINISH TEMPLAR AND PAYOUTS, ETC. - MAKE MORE THOROUGH)
 
+1. Download the latest release and extract it on your target server:
+   ```bash
+   curl -L -O https://github.com/satoshiware/sc-node/releases/download/v1.0.0/azpool-backend.tar.gz
+   tar -xzf azpool-backend.tar.gz
+   cd azpool-backend
+   ```
 
-#Todo Notes (messy):
-## Wireguard Updating -- manual process -- adding/removing pools -- initial configuration -- WORK IN PROGRESS
+2. Carefully configure the environment file:
+   ```bash
+   nano azpool-backend.env
+   ```
 
- Update rpcauth user "coinbase" with list of whitelisted commands<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
- Each pool instance shares the same noise protocol private key. That way, it doesn't matter.
- Each pool instance has its own ip address, domain name round robin and bgp protocol.
+   **Pay very close attention** when editing `azpool-backend.env`.  
+   This file contains all critical settings including download URLs, SHA256 checksums, FIDO2 public keys, hostname, ports, and security options.
+
+3. Run the installer:
+   ```bash
+   chmod +x azpool-backend-setup.sh
+   sudo ./azpool-backend-setup.sh
+   ```
+
+4. After installation finishes successfully:
+   ```bash
+   sudo manage-wireguard-clients          # Add your first client / pool instance
+   cat /home/satoshi/readme.txt           # View the full management guide
+   ```
+
+## Important Notes
+- The setup script performs full validation and verifies all downloaded components with SHA256.
+- After setup, forward the required ports on your router/firewall:
+  - SSH (22/tcp)
+  - AZCoin P2P port (configured in env file)
+  - WireGuard port (configured in env file)
+- Detailed daily management instructions (FIDO2 keys, WireGuard, commands, paths, etc.) are located in `/home/satoshi/readme.txt` on the server.
+
+For more technical details about the setup process, review `azpool-backend-setup.sh`.
