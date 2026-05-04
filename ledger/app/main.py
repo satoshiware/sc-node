@@ -9,7 +9,7 @@ import uuid
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from app.audit import (
     build_payout_audit_event,
@@ -33,6 +33,7 @@ from app.poller import poll_channels_once_with_blocks, poll_metrics_once, upsert
 from app.pool_client import PoolApiError, fetch_block_rewards_by_hashes, fetch_blocks_found_in_window
 from app.postgres_db import make_postgres_engine, make_postgres_session_factory
 from app.postgres_repositories import PostgresLedgerRepository
+from app.postgres_shadow_compare import compare_postgres_shadow_settlement
 from app.reward_contract import compute_matured_window
 from app.scheduler import start_scheduler, stop_scheduler
 from app.sender import process_payout_events
@@ -1352,6 +1353,14 @@ def latest_settlement() -> dict:
             for payout, user in rows
         ],
     }
+
+
+@app.get("/postgres-shadow/settlements/{settlement_id}/compare")
+@app.get("/v1/postgres-shadow/settlements/{settlement_id}/compare")
+def compare_postgres_shadow_endpoint(settlement_id: int) -> JSONResponse:
+    with _new_session() as session:
+        payload, status_code = compare_postgres_shadow_settlement(session, settlement_id)
+    return JSONResponse(status_code=status_code, content=payload)
 
 
 @app.post("/settlements/run")
