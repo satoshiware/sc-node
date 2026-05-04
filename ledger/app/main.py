@@ -1226,11 +1226,10 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
                 maturity_window_minutes=int(settings.maturity_window_minutes),
             )
             fetched_block_rows: list[dict[str, object]] = []
-            if settings.translator_blocks_found_url:
-                try:
-                    fetched_block_rows = fetch_blocks_found_in_window(matured_start, matured_end)
-                except PoolApiError:
-                    fetched_block_rows = []
+            try:
+                fetched_block_rows = fetch_blocks_found_in_window(matured_start, matured_end)
+            except PoolApiError:
+                fetched_block_rows = []
 
             if settings.enable_block_event_replay_hook:
                 try:
