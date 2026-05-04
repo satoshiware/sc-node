@@ -547,6 +547,16 @@ class PostgresLedgerRepository:
             select(account_ledger_entries).where(account_ledger_entries.c.id == entry_id)
         )
 
+    def get_account_ledger_entry_by_settlement_credit_id(
+        self,
+        settlement_credit_id: int,
+    ) -> dict[str, Any] | None:
+        return self._select_one_or_none(
+            select(account_ledger_entries).where(
+                account_ledger_entries.c.settlement_credit_id == settlement_credit_id
+            )
+        )
+
     def set_account_balance(
         self,
         *,
