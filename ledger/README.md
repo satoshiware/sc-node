@@ -103,3 +103,33 @@ The output includes:
 - user_share_delta and user_work_delta,
 - payout_fraction and amount_btc,
 - translator_total_work for that payout interval.
+
+## Postgres Schema Migrations
+
+Local Postgres schema bootstrapping for the payout ledger:
+
+```bash
+cd ledger
+docker compose -f docker-compose.postgres.yml up -d
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+alembic -c alembic.ini upgrade head
+```
+
+Inspect the schema:
+
+```bash
+docker compose -f docker-compose.postgres.yml exec postgres psql -U azledger -d azcoin_ledger_dev -c "\dt"
+docker compose -f docker-compose.postgres.yml exec postgres psql -U azledger -d azcoin_ledger_dev -c "\d settlement_windows"
+docker compose -f docker-compose.postgres.yml exec postgres psql -U azledger -d azcoin_ledger_dev -c "\d settlement_blocks"
+```
+
+Roll back and stop:
+
+```bash
+alembic -c alembic.ini downgrade base
+docker compose -f docker-compose.postgres.yml down
+```
