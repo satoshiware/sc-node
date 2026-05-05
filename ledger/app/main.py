@@ -8,8 +8,8 @@ import uuid
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Query
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from app.audit import (
     build_payout_audit_event,
@@ -19,6 +19,7 @@ from app.audit import (
 )
 from app.config import load_settings
 from app.db import make_engine, make_session_factory
+from app.delta import compute_user_contribution_deltas
 from app.hooks import (
     run_block_event_replay_hook,
     run_reward_refetch_hook,
@@ -30,6 +31,12 @@ from app.mapping import parse_identity
 from app.models import BlockCounterState, PayoutEvent, Settlement, SnapshotBlock, User, UserPayout
 from app.poller import poll_channels_once_with_blocks, poll_metrics_once, upsert_snapshot_blocks
 from app.pool_client import PoolApiError, fetch_block_rewards_by_hashes, fetch_blocks_found_in_window
+from app.postgres_db import make_postgres_engine, make_postgres_session_factory
+from app.postgres_repositories import PostgresLedgerRepository
+from app.postgres_shadow_compare import (
+    audit_postgres_shadow_settlements,
+    compare_postgres_shadow_settlement,
+)
 from app.reward_contract import compute_matured_window
 from app.scheduler import start_scheduler, stop_scheduler
 from app.sender import process_payout_events
@@ -37,6 +44,7 @@ from app.settlement import run_settlement
 
 app = FastAPI(title="Mining Payout Service", version="0.1.0")
 _SERVICE_STARTED_AT: datetime | None = None
+_SATS_PER_BTC = Decimal("100000000")
 
 
 def _sum_payout_amount(payout_rows: list[dict[str, object]]) -> Decimal:
@@ -380,6 +388,228 @@ def _new_session() -> Session:
 
 def _to_decimal_str(value: object) -> str:
     return f"{Decimal(str(value or 0)):.8f}"
+
+
+def _as_utc_aware(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _btc_to_sats(value: object) -> int:
+    sats = Decimal(str(value or 0)) * _SATS_PER_BTC
+    integral_sats = sats.to_integral_value()
+    if sats != integral_sats:
+        raise ValueError(f"Expected 8-decimal BTC value, got {value!r}")
+    return int(integral_sats)
+
+
+def _load_settlement_payout_rows(
+    session: Session,
+    settlement_id: int,
+) -> list[tuple[UserPayout, User]]:
+    return session.execute(
+        select(UserPayout, User)
+        .join(User, User.id == UserPayout.user_id)
+        .where(UserPayout.settlement_id == settlement_id)
+        .order_by(User.username.asc(), UserPayout.id.asc())
+    ).all()
+
+
+def _load_settlement_block_models(
+    session: Session,
+    settlement_id: int,
+) -> list[SnapshotBlock]:
+    return session.execute(
+        select(SnapshotBlock)
+        .where(SnapshotBlock.settlement_id == settlement_id)
+        .order_by(SnapshotBlock.found_at.asc(), SnapshotBlock.id.asc())
+    ).scalars().all()
+
+
+def _uses_work_basis_for_shadow_write(
+    user_contributions: dict[str, object],
+    payout_rows: list[tuple[UserPayout, User]],
+) -> bool:
+    if any(Decimal(str(getattr(item, "work_delta", 0))) > 0 for item in user_contributions.values()):
+        return True
+
+    for payout, user in payout_rows:
+        contribution_value = Decimal(str(payout.contribution_value or 0))
+        share_delta = Decimal(
+            str(getattr(user_contributions.get(user.username), "share_delta", 0))
+        )
+        if contribution_value != share_delta:
+            return True
+
+    return False
+
+
+def _load_user_total_payout_sats(session: Session, user_id: int) -> int:
+    total_btc = session.execute(
+        select(func.coalesce(func.sum(UserPayout.amount_btc), 0)).where(UserPayout.user_id == user_id)
+    ).scalar_one()
+    return _btc_to_sats(total_btc)
+
+
+def _shadow_write_postgres_settlement(
+    session: Session,
+    *,
+    settlement_id: int,
+    settlement_status: str,
+    settlement_period_end: datetime,
+    settlement_pool_reward_btc: Decimal,
+    settlement_total_work: Decimal,
+    settlement_total_shares: int,
+    work_window_start: datetime,
+    work_window_end: datetime,
+) -> dict[str, object]:
+    settlement_run_at = _as_utc_aware(settlement_period_end)
+    shadow_repository = PostgresLedgerRepository(
+        make_postgres_session_factory(make_postgres_engine())
+    )
+
+    payout_rows = _load_settlement_payout_rows(session, settlement_id)
+    block_rows = _load_settlement_block_models(session, settlement_id)
+    user_contributions = compute_user_contribution_deltas(session, work_window_start, work_window_end)
+    use_work_basis = _uses_work_basis_for_shadow_write(user_contributions, payout_rows)
+    maturity_offset_minutes = max(
+        0,
+        int((settlement_period_end - work_window_end).total_seconds() // 60),
+    )
+
+    shadow_settlement = shadow_repository.upsert_settlement_window(
+        settlement_run_at=settlement_run_at,
+        work_window_start=_as_utc_aware(work_window_start),
+        work_window_end=_as_utc_aware(work_window_end),
+        maturity_offset_minutes=maturity_offset_minutes,
+        status=settlement_status,
+        total_reward_sats=_btc_to_sats(settlement_pool_reward_btc),
+        total_work=settlement_total_work,
+        total_shares=settlement_total_shares,
+        completed_at=settlement_run_at if settlement_status == "completed" else None,
+    )
+
+    shadow_users_by_username: dict[str, dict[str, object]] = {}
+
+    def _shadow_user(username: str) -> dict[str, object]:
+        existing = shadow_users_by_username.get(username)
+        if existing is not None:
+            return existing
+        row = shadow_repository.upsert_user(username)
+        shadow_users_by_username[username] = row
+        return row
+
+    invalid_identity_count = 0
+    linked_block_count = 0
+    for block_row in block_rows:
+        worker_identity = block_row.worker_identity
+        if worker_identity:
+            try:
+                identity_parts = parse_identity(worker_identity)
+            except ValueError:
+                invalid_identity_count += 1
+            else:
+                user_row = _shadow_user(identity_parts.username)
+                shadow_repository.upsert_miner_identity(
+                    user_id=int(user_row["id"]),
+                    identity=worker_identity,
+                    worker_name=identity_parts.worker,
+                    created_at=_as_utc_aware(block_row.created_at),
+                )
+
+        shadow_repository.upsert_block_found(
+            blockhash=block_row.blockhash,
+            found_at=_as_utc_aware(block_row.found_at),
+            channel_id=block_row.channel_id,
+            worker_identity=worker_identity,
+            source=block_row.source,
+            created_at=_as_utc_aware(block_row.created_at),
+        )
+
+        reward_sats = block_row.reward_sats
+        if reward_sats is None or int(reward_sats) <= 0:
+            continue
+
+        shadow_repository.upsert_block_reward(
+            blockhash=block_row.blockhash,
+            reward_sats=int(reward_sats),
+            fetched_at=_as_utc_aware(block_row.reward_fetched_at) or settlement_run_at,
+        )
+        shadow_repository.link_settlement_block(
+            settlement_id=int(shadow_settlement["id"]),
+            blockhash=block_row.blockhash,
+            reward_sats=int(reward_sats),
+        )
+        linked_block_count += 1
+
+    payout_rows_by_username = {user.username: payout for payout, user in payout_rows}
+    usernames = sorted(set(user_contributions.keys()) | set(payout_rows_by_username.keys()))
+
+    for username in usernames:
+        shadow_user = _shadow_user(username)
+        contribution = user_contributions.get(username)
+        share_delta = int(getattr(contribution, "share_delta", 0) or 0)
+        work_delta = Decimal(str(getattr(contribution, "work_delta", 0) or 0))
+        payout_fraction = Decimal("0")
+        payout = payout_rows_by_username.get(username)
+
+        if payout is not None:
+            payout_fraction = Decimal(str(payout.payout_fraction or 0))
+            if use_work_basis:
+                work_delta = Decimal(str(payout.contribution_value or 0))
+
+        shadow_repository.upsert_settlement_user_work(
+            settlement_id=int(shadow_settlement["id"]),
+            user_id=int(shadow_user["id"]),
+            share_delta=share_delta,
+            work_delta=work_delta,
+            payout_fraction=payout_fraction,
+        )
+
+        if payout is None:
+            continue
+
+        amount_sats = _btc_to_sats(payout.amount_btc)
+        credit = shadow_repository.upsert_settlement_user_credit(
+            settlement_id=int(shadow_settlement["id"]),
+            user_id=int(shadow_user["id"]),
+            amount_sats=amount_sats,
+            idempotency_key=payout.idempotency_key,
+            status=payout.status,
+        )
+
+        if amount_sats > 0 and (
+            shadow_repository.get_account_ledger_entry_by_settlement_credit_id(int(credit["id"])) is None
+        ):
+            shadow_repository.create_account_ledger_entry(
+                user_id=int(shadow_user["id"]),
+                entry_type="settlement_credit",
+                amount_sats=amount_sats,
+                direction="credit",
+                settlement_credit_id=int(credit["id"]),
+                memo=f"sqlite-shadow settlement {settlement_id}",
+                created_at=settlement_run_at,
+            )
+
+        shadow_repository.set_account_balance(
+            user_id=int(shadow_user["id"]),
+            balance_sats=_load_user_total_payout_sats(session, payout.user_id),
+            updated_at=settlement_run_at,
+        )
+
+    return {
+        "enabled": True,
+        "status": "completed",
+        "settlement_id": settlement_id,
+        "shadow_settlement_id": int(shadow_settlement["id"]),
+        "user_count": len(usernames),
+        "payout_credit_count": len(payout_rows),
+        "linked_block_count": linked_block_count,
+        "invalid_identity_count": invalid_identity_count,
+    }
 
 
 def _normalize_reward_mode(value: str) -> str:
@@ -1128,6 +1358,33 @@ def latest_settlement() -> dict:
     }
 
 
+@app.get("/postgres-shadow/settlements/{settlement_id}/compare")
+@app.get("/v1/postgres-shadow/settlements/{settlement_id}/compare")
+def compare_postgres_shadow_endpoint(settlement_id: int) -> JSONResponse:
+    with _new_session() as session:
+        payload, status_code = compare_postgres_shadow_settlement(session, settlement_id)
+    return JSONResponse(status_code=status_code, content=payload)
+
+
+@app.get("/postgres-shadow/settlements/audit")
+@app.get("/v1/postgres-shadow/settlements/audit")
+def audit_postgres_shadow_endpoint(
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    status_filter: str | None = Query(default=None, pattern="^(matched|mismatched|not_found|error)$"),
+    include_details: bool = False,
+) -> JSONResponse:
+    with _new_session() as session:
+        payload, status_code = audit_postgres_shadow_settlements(
+            session,
+            limit=limit,
+            offset=offset,
+            status_filter=status_filter,
+            include_details=include_details,
+        )
+    return JSONResponse(status_code=status_code, content=payload)
+
+
 @app.post("/settlements/run")
 def run_settlement_cycle() -> dict:
     return _execute_settlement_cycle(force_settlement=True)
@@ -1138,6 +1395,7 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
     reward_mode = _normalize_reward_mode(settings.reward_mode)
     block_reward_btc = Decimal(str(settings.block_reward_btc or "1.87500000"))
     attempt_id = str(uuid.uuid4())
+    postgres_shadow_write: dict[str, object] | None = None
 
     with _new_session() as session:
         attempt_time = datetime.now(UTC).replace(tzinfo=None)
@@ -1226,11 +1484,10 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
                 maturity_window_minutes=int(settings.maturity_window_minutes),
             )
             fetched_block_rows: list[dict[str, object]] = []
-            if settings.translator_blocks_found_url:
-                try:
-                    fetched_block_rows = fetch_blocks_found_in_window(matured_start, matured_end)
-                except PoolApiError:
-                    fetched_block_rows = []
+            try:
+                fetched_block_rows = fetch_blocks_found_in_window(matured_start, matured_end)
+            except PoolApiError:
+                fetched_block_rows = []
 
             if settings.enable_block_event_replay_hook:
                 try:
@@ -1412,6 +1669,37 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
                 },
             )
 
+        if settings.postgres_ledger_shadow_write_enabled:
+            effective_work_window_start = settlement_kwargs.get("work_window_start") or settlement_result.period_start
+            effective_work_window_end = settlement_kwargs.get("work_window_end") or settlement_result.period_end
+            try:
+                postgres_shadow_write = _shadow_write_postgres_settlement(
+                    session,
+                    settlement_id=settlement_result.settlement_id,
+                    settlement_status=settlement_result.status,
+                    settlement_period_end=settlement_result.period_end,
+                    settlement_pool_reward_btc=settlement_result.pool_reward_btc,
+                    settlement_total_work=settlement_result.total_work,
+                    settlement_total_shares=settlement_result.total_shares,
+                    work_window_start=effective_work_window_start,
+                    work_window_end=effective_work_window_end,
+                )
+            except Exception as exc:
+                postgres_shadow_write = {
+                    "enabled": True,
+                    "status": "failed",
+                    "settlement_id": settlement_result.settlement_id,
+                    "error": str(exc),
+                }
+                _write_scheduler_event(
+                    "postgres_shadow_write_failed",
+                    {
+                        "settlement_id": settlement_result.settlement_id,
+                        "error": str(exc),
+                        "traceback": traceback.format_exc(),
+                    },
+                )
+
     response = {
         "snapshots_created": snapshots_created,
         "settlement_skipped": False,
@@ -1444,5 +1732,7 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
             "computed_reward_btc": _to_decimal_str(Decimal(interval_blocks) * block_reward_btc),
             "channels": block_delta_details,
         }
+    if postgres_shadow_write is not None:
+        response["postgres_shadow_write"] = postgres_shadow_write
 
     return response
