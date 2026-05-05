@@ -543,6 +543,27 @@ class PostgresLedgerRepository:
             .order_by(users.c.username.asc(), settlement_user_credits.c.id.asc())
         )
 
+    def list_settlement_user_work_with_users(self, settlement_id: int) -> list[dict[str, Any]]:
+        return self._select_all(
+            select(
+                settlement_user_work.c.id,
+                settlement_user_work.c.settlement_id,
+                settlement_user_work.c.user_id,
+                settlement_user_work.c.share_delta,
+                settlement_user_work.c.work_delta,
+                settlement_user_work.c.payout_fraction,
+                users.c.username,
+            )
+            .select_from(
+                settlement_user_work.join(
+                    users,
+                    users.c.id == settlement_user_work.c.user_id,
+                )
+            )
+            .where(settlement_user_work.c.settlement_id == settlement_id)
+            .order_by(users.c.username.asc(), settlement_user_work.c.id.asc())
+        )
+
     def list_settlement_blocks(self, settlement_id: int) -> list[dict[str, Any]]:
         return self._select_all(
             select(
@@ -564,6 +585,19 @@ class PostgresLedgerRepository:
             .where(settlement_blocks.c.settlement_id == settlement_id)
             .order_by(blocks_found.c.found_at.asc(), settlement_blocks.c.id.asc())
         )
+
+    def list_settlement_history(self, limit: int = 100) -> list[dict[str, Any]]:
+        rows = self._select_all(
+            select(settlement_windows)
+            .order_by(settlement_windows.c.work_window_end.desc(), settlement_windows.c.id.desc())
+            .limit(limit)
+        )
+        for row in rows:
+            settlement_id = int(row["id"])
+            row["user_credits"] = self.list_settlement_user_credits_with_users(settlement_id)
+            row["user_work"] = self.list_settlement_user_work_with_users(settlement_id)
+            row["settlement_blocks"] = self.list_settlement_blocks(settlement_id)
+        return rows
 
     def create_account_ledger_entry(
         self,
