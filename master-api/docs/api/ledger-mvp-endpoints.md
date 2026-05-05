@@ -448,6 +448,44 @@ The endpoint inherits the translator passthrough error model:
 
 ## 6. Add ledger endpoint specs — `/v1/ledger/*`
 
+### Translator Block Reward Events (`GET /v1/translator/block-reward-events`)
+
+- **Truth role:** production block reward event source.
+- **Auth:** protected.
+- **What it does:** first parses out-of-box aztranslator/JD-client
+  `Block Found` log or journal lines containing the submitted 64-hex
+  share hash, then verifies direct and byte-reversed hash forms against
+  chain reward truth.
+- **Fallback:** if the translator log/journal parser returns zero events,
+  the route falls back to AZCoin Core reward ownership by calling the
+  existing `/v1/az/blocks/rewards` scan logic with `owned_only=true` for
+  the requested `start_time` / `end_time` / `time_field` interval.
+- **Ownership rule:** fallback rows are only blocks whose coinbase output
+  matches the configured `AZ_REWARD_OWNERSHIP_ADDRESSES` and/or
+  `AZ_REWARD_OWNERSHIP_SCRIPT_PUBKEYS`.
+- **Blocked rule:** if reward ownership matching is not configured and
+  fallback is needed, the response is `status="blocked"`,
+  `source="azcoin_core_reward_ownership"`,
+  `blocked_reason="reward_ownership_not_configured"`,
+  `payout_ready_count=0`, and `items=[]`.
+- **Source audit:** `source_attempts` records each attempted source and
+  count, for example
+  `["aztranslator_journal:0", "azcoin_core_reward_ownership:46"]`.
+- **Fallback item fields:** owned chain reward fallback items use
+  `proof_type="chain_coinbase_reward"` and
+  `source="azcoin_core_reward_ownership"`, and expose `found_time`,
+  `found_time_iso`, `blockhash`, `coinbase_total_sats`,
+  `confirmations`, `maturity_status`, `is_on_main_chain`, and
+  `payout_ready`.
+- **Payout-ready rule:** `payout_ready=true` only when
+  `blockhash != null`, `is_on_main_chain == true`,
+  `maturity_status == "mature"`, and
+  `coinbase_total_sats != null`.
+- **Non-goal:** the production path does not use timestamp candidate
+  correlation, `nearest_candidate_blockhash`, or worker-level attribution.
+
+---
+
 ### Translator Blocks Found Evidence (`GET /v1/translator/blocks-found`)
 
 - **Truth role:** translator local-work evidence.
@@ -485,14 +523,10 @@ The endpoint inherits the translator passthrough error model:
   candidates leave `blockhash=null` and return
   `blockhash_status="ambiguous"` with
   `correlation_status="candidate_multiple_ambiguous"`.
-- **Payout-safe ingestion rule:** ledger auto-crediting must ingest only
-  rows where all of the following are true:
-  `blockhash_status=="resolved"`,
-  `correlation_status=="resolved_to_blockhash"`,
-  `candidate_count==1`,
-  `blockhash!=null`,
-  `candidate_coinbase_total_sats!=null`,
-  and `payout_ready==true`.
+- **Payout ingestion rule:** this endpoint is diagnostic/audit evidence
+  only. Ledger auto-crediting must use
+  `/v1/translator/block-reward-events`, not timestamp candidate
+  correlation from this route.
 - **Candidate block rule:** `candidate_blocks` remain time-window
   correlation evidence, not settlement execution. Wider diagnostic
   windows can legitimately produce ambiguity and require manual review.

@@ -52,8 +52,11 @@ Exit codes:
   Translator readiness summary.
 - `GET /v1/translator/miner-work/snapshot`
   Translator local work truth for the current joined worker/channel view.
+- `GET /v1/translator/block-reward-events`
+  Production block reward event source. Falls back to AZCoin Core reward
+  ownership when translator log/journal proof yields zero events.
 - `GET /v1/translator/blocks-found`
-  Durable translator-side counter-delta evidence.
+  Durable translator-side counter-delta evidence; diagnostic/audit only.
 - `GET /v1/az/blocks/rewards?owned_only=false&limit=10`
   Chain reward truth.
 
@@ -103,6 +106,21 @@ From `GET /v1/translator/blocks-found`:
 - `blockhash`
 - `blockhash_status`
 - `correlation_status`
+
+From `GET /v1/translator/block-reward-events`:
+
+- `found_time`
+- `found_time_iso`
+- `blockhash`
+- `proof_type`
+- `source`
+- `coinbase_total_sats`
+- `confirmations`
+- `maturity_status`
+- `is_on_main_chain`
+- `payout_ready`
+- `source_attempts`
+- `blocked_reason`
 
 From `GET /v1/az/blocks/rewards`:
 
@@ -165,14 +183,14 @@ If `/v1/translator/blocks-found` is called with
 windows such as 180 or 300 seconds are diagnostic/manual-review only
 because they may return multiple candidate blocks for one event.
 
-Ledger auto-crediting must ingest only rows where all of the following
-are true:
+Ledger auto-crediting must use `/v1/translator/block-reward-events`, not
+candidate correlation from `/v1/translator/blocks-found`. Ingest only
+reward-event rows where all of the following are true:
 
-- `blockhash_status == "resolved"`
-- `correlation_status == "resolved_to_blockhash"`
-- `candidate_count == 1`
 - `blockhash != null`
-- `candidate_coinbase_total_sats != null`
+- `is_on_main_chain == true`
+- `maturity_status == "mature"`
+- `coinbase_total_sats != null`
 - `payout_ready == true`
 
 ## Explicit Non-Goal Warning

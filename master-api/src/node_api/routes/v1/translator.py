@@ -6,9 +6,9 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
+from node_api.services import translator_block_reward_events as tbre
 from node_api.services import translator_blocks_found_candidates as tbfc
 from node_api.services import translator_blocks_found_store as tbfs
-from node_api.services import translator_block_reward_events as tbre
 from node_api.services import translator_logs as tl
 from node_api.services import translator_miner_work as tmw
 from node_api.services import translator_monitoring as tm
@@ -238,10 +238,11 @@ class TranslatorBlocksFoundCandidatesResponse(BaseModel):
 class TranslatorBlockRewardEventItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    found_time: int
-    found_time_iso: str
-    proof_type: Literal["translator_block_found_share_hash"]
-    raw_share_hash: str
+    found_time: int | None = None
+    found_time_iso: str | None = None
+    proof_type: Literal["translator_block_found_share_hash", "chain_coinbase_reward"]
+    raw_share_hash: str | None = None
+    blockhash: str | None = None
     matched_blockhash: str | None = None
     hash_match_method: Literal["direct", "byte_reversed"] | None = None
     chain_status: Literal["matched", "not_found", "not_main_chain", "immature"]
@@ -250,20 +251,22 @@ class TranslatorBlockRewardEventItem(BaseModel):
     maturity_status: str | None = None
     is_on_main_chain: bool
     payout_ready: bool
-    source: Literal["aztranslator_journal", "translator_log"]
+    source: Literal["aztranslator_journal", "translator_log", "azcoin_core_reward_ownership"]
     raw_log_line: str | None = None
 
 
 class TranslatorBlockRewardEventsResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    status: Literal["ok"]
-    source: Literal["aztranslator_journal", "translator_log"]
+    status: Literal["ok", "blocked", "error"]
+    source: Literal["aztranslator_journal", "translator_log", "azcoin_core_reward_ownership"]
+    blocked_reason: str | None = None
     total: int
     matched_count: int
     payout_ready_count: int
     not_found_count: int
     immature_count: int
+    source_attempts: list[str]
     items: list[TranslatorBlockRewardEventItem]
 
 
@@ -472,17 +475,46 @@ def translator_blocks_found(
 def translator_block_reward_events(
     settings: Settings = Depends(get_settings),
     limit: int = Query(default=100, ge=1, le=1000),
+    start_time: int | None = Query(
+        default=None,
+        ge=0,
+        description=(
+            "Inclusive lower bound (Unix seconds) for chain reward fallback. "
+            "Must be supplied together with end_time."
+        ),
+    ),
+    end_time: int | None = Query(
+        default=None,
+        ge=0,
+        description=(
+            "Exclusive upper bound (Unix seconds) for chain reward fallback. "
+            "Must be supplied together with start_time."
+        ),
+    ),
+    time_field: Literal["time", "mediantime"] = Query(
+        default="time",
+        description="Block timestamp field used by chain reward fallback interval filtering.",
+    ),
 ) -> dict[str, Any]:
-    """Production block reward events from translator Block Found share-hash proof.
+    """Production block reward events from translator proof or owned chain rewards.
 
     This endpoint parses the out-of-box translator/JD-client log or journal
     lines that include ``Block Found`` and the submitted share hash, then
-    verifies that hash against chain reward truth. Timestamp correlation from
+    verifies that hash against chain reward truth. If that source has no
+    block-found proof lines, it falls back to AZCoin Core reward ownership
+    using the same coinbase-output matching configuration as
+    ``/v1/az/blocks/rewards?owned_only=true``. Timestamp correlation from
     ``/translator/blocks-found?include_candidate_blocks=true`` remains
     diagnostic only and must not drive payout readiness.
     """
     return TranslatorBlockRewardEventsResponse.model_validate(
-        tbre.block_reward_events_payload(settings, limit=limit)
+        tbre.block_reward_events_payload(
+            settings,
+            limit=limit,
+            start_time=start_time,
+            end_time=end_time,
+            time_field=time_field,
+        )
     ).model_dump()
 
 
