@@ -17,7 +17,11 @@ from app.audit import (
     rotate_payout_audit_log,
     write_payout_audit_log,
 )
-from app.config import load_settings
+from app.config import (
+    POSTGRES_LEDGER_READ_MODE_AUTHORITATIVE,
+    POSTGRES_LEDGER_READ_MODE_SHADOW_CANDIDATE,
+    load_settings,
+)
 from app.db import make_engine, make_session_factory
 from app.delta import compute_user_contribution_deltas
 from app.hooks import (
@@ -36,6 +40,7 @@ from app.postgres_repositories import PostgresLedgerRepository
 from app.postgres_shadow_compare import (
     audit_postgres_shadow_settlements,
     compare_postgres_shadow_settlement,
+    get_postgres_shadow_compare_repository,
 )
 from app.reward_contract import compute_matured_window
 from app.scheduler import start_scheduler, stop_scheduler
@@ -45,6 +50,20 @@ from app.settlement import run_settlement
 app = FastAPI(title="Mining Payout Service", version="0.1.0")
 _SERVICE_STARTED_AT: datetime | None = None
 _SATS_PER_BTC = Decimal("100000000")
+POSTGRES_READ_ENDPOINT_SETTLEMENT_HISTORY = "settlement_history"
+POSTGRES_READ_ENDPOINT_SETTLEMENT_DETAIL = "settlement_detail"
+POSTGRES_READ_ENDPOINTS_REQUIRING_PUBLIC_SETTLEMENT_ID = frozenset(
+    {
+        POSTGRES_READ_ENDPOINT_SETTLEMENT_HISTORY,
+        POSTGRES_READ_ENDPOINT_SETTLEMENT_DETAIL,
+    }
+)
+POSTGRES_CANDIDATE_READ_MODES = frozenset(
+    {
+        POSTGRES_LEDGER_READ_MODE_SHADOW_CANDIDATE,
+        POSTGRES_LEDGER_READ_MODE_AUTHORITATIVE,
+    }
+)
 
 
 def _sum_payout_amount(payout_rows: list[dict[str, object]]) -> Decimal:
@@ -59,6 +78,10 @@ def _to_int(value: object) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _sats_to_btc_str(value: object) -> str:
+    return _to_decimal_str(Decimal(_to_int(value)) / _SATS_PER_BTC)
 
 
 def _contribution_index(user_contributions: list[dict[str, object]]) -> dict[str, dict[str, Decimal | int]]:
@@ -269,6 +292,85 @@ def _build_work_delta_explanation(snapshot_alignment: dict[str, object]) -> dict
         "per_user": per_user,
         "per_identity": per_identity,
     }
+
+
+def _postgres_read_diagnostics(
+    *,
+    read_source: str,
+    effective_read_mode: str,
+    fallback_used: bool,
+    endpoint_id: str,
+) -> dict[str, object]:
+    return {
+        "read_source": read_source,
+        "effective_read_mode": effective_read_mode,
+        "fallback_used": fallback_used,
+        "postgres_read_endpoint": endpoint_id,
+    }
+
+
+def _postgres_read_error_response(settings, endpoint_id: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={
+            "status": "error",
+            "error": "Postgres candidate read failed.",
+            "read_diagnostics": _postgres_read_diagnostics(
+                read_source="postgres",
+                effective_read_mode=settings.effective_postgres_read_mode,
+                fallback_used=False,
+                endpoint_id=endpoint_id,
+            ),
+        },
+    )
+
+
+def _postgres_read_endpoint_is_allowed(settings, endpoint_id: str) -> bool:
+    return (
+        settings.postgres_ledger_reads_enabled
+        and settings.effective_postgres_read_mode in POSTGRES_CANDIDATE_READ_MODES
+        and endpoint_id in settings.postgres_read_allowed_endpoints
+    )
+
+
+def _postgres_candidate_read_has_public_settlement_id_mapping(endpoint_id: str) -> bool:
+    if endpoint_id not in POSTGRES_READ_ENDPOINTS_REQUIRING_PUBLIC_SETTLEMENT_ID:
+        return True
+
+    # The current shadow schema stores settlement_windows.id as the Postgres
+    # surrogate and related settlement_id columns as FKs to that surrogate.
+    # There is no durable source SQLite settlement id column yet, so public
+    # settlement_id endpoints must remain on SQLite until that mapping exists.
+    return False
+
+
+def _postgres_shadow_audit_allows_candidate_read(session: Session) -> bool:
+    payload, status_code = audit_postgres_shadow_settlements(
+        session,
+        limit=10,
+        include_details=False,
+    )
+    return (
+        status_code == 200
+        and payload.get("comparison_status") == "matched"
+        and _to_int(payload.get("mismatched_count")) == 0
+        and _to_int(payload.get("not_found_count")) == 0
+        and _to_int(payload.get("error_count")) == 0
+    )
+
+
+def _should_use_postgres_candidate_read(settings, endpoint_id: str, session: Session) -> bool:
+    if not _postgres_read_endpoint_is_allowed(settings, endpoint_id):
+        return False
+    if not _postgres_candidate_read_has_public_settlement_id_mapping(endpoint_id):
+        return False
+    if not settings.postgres_ledger_read_require_shadow_match:
+        return True
+    return _postgres_shadow_audit_allows_candidate_read(session)
+
+
+def _get_postgres_candidate_read_repository() -> PostgresLedgerRepository:
+    return get_postgres_shadow_compare_repository()
 
 
 @app.get("/health")
@@ -694,8 +796,38 @@ def audit_logs(limit: int = 50) -> dict:
 
 
 @app.get("/audit/settlements")
-def audit_settlements(limit: int = 120) -> dict:
+def audit_settlements(limit: int = 120):
     settings = load_settings()
+    endpoint_id = POSTGRES_READ_ENDPOINT_SETTLEMENT_HISTORY
+    with _new_session() as session:
+        use_postgres = _should_use_postgres_candidate_read(settings, endpoint_id, session)
+        if use_postgres:
+            try:
+                payload = _read_postgres_settlement_history(limit=limit)
+                payload["read_diagnostics"] = _postgres_read_diagnostics(
+                    read_source="postgres",
+                    effective_read_mode=settings.effective_postgres_read_mode,
+                    fallback_used=False,
+                    endpoint_id=endpoint_id,
+                )
+                return payload
+            except Exception:
+                if not settings.postgres_ledger_read_fallback_to_sqlite:
+                    return _postgres_read_error_response(settings, endpoint_id)
+
+                payload = _read_sqlite_settlement_history(settings, session, limit=limit)
+                payload["read_diagnostics"] = _postgres_read_diagnostics(
+                    read_source="sqlite_fallback",
+                    effective_read_mode=settings.effective_postgres_read_mode,
+                    fallback_used=True,
+                    endpoint_id=endpoint_id,
+                )
+                return payload
+
+        return _read_sqlite_settlement_history(settings, session, limit=limit)
+
+
+def _read_sqlite_settlement_history(settings, session: Session, *, limit: int) -> dict:
     payload = read_recent_audit_entries(settings.payout_audit_log_path, limit=max(limit * 3, 500))
 
     attempts: list[dict[str, object]] = []
@@ -713,8 +845,7 @@ def audit_settlements(limit: int = 120) -> dict:
         for entry in attempts
         if _to_int((entry.get("settlement") or {}).get("settlement_id")) > 0
     ]
-    with _new_session() as session:
-        blocks_by_settlement = _load_block_rows_by_settlement(session, settlement_ids)
+    blocks_by_settlement = _load_block_rows_by_settlement(session, settlement_ids)
 
     normalized: list[dict[str, object]] = []
     previous_payout_settlement_id: int | None = None
@@ -796,6 +927,159 @@ def audit_settlements(limit: int = 120) -> dict:
         "scheduler_enabled": bool(settings.scheduler_enabled),
         "scheduler_interval_seconds": int(settings.scheduler_interval_seconds),
         "scheduler_events": scheduler_events,
+        "settlements": normalized,
+    }
+
+
+def _postgres_settlement_history_rows(limit: int) -> list[dict[str, object]]:
+    repository = _get_postgres_candidate_read_repository()
+    return repository.list_settlement_history(limit=max(int(limit), 0))
+
+
+def _postgres_history_user_contributions(
+    user_work_rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "username": str(row.get("username") or ""),
+            "share_delta": _to_int(row.get("share_delta")),
+            "work_delta": _to_decimal_str(row.get("work_delta") or "0"),
+        }
+        for row in user_work_rows
+    ]
+
+
+def _postgres_history_payout_breakdown(
+    credit_rows: list[dict[str, object]],
+    user_work_rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    work_by_username = {str(row.get("username") or ""): row for row in user_work_rows}
+    breakdown: list[dict[str, object]] = []
+    for credit in credit_rows:
+        username = str(credit.get("username") or "")
+        work_row = work_by_username.get(username, {})
+        contribution_value = (
+            work_row.get("work_delta")
+            if Decimal(str(work_row.get("work_delta") or "0")) > 0
+            else work_row.get("share_delta", 0)
+        )
+        breakdown.append(
+            {
+                "username": username,
+                "amount_btc": _sats_to_btc_str(credit.get("amount_sats")),
+                "status": credit.get("status"),
+                "payout_fraction": str(work_row.get("payout_fraction") or "0"),
+                "contribution_value": _to_decimal_str(contribution_value or "0"),
+                "share_delta": _to_int(work_row.get("share_delta")),
+                "work_delta": _to_decimal_str(work_row.get("work_delta") or "0"),
+            }
+        )
+    return breakdown
+
+
+def _postgres_history_block_rows(block_rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [
+        {
+            "found_at": row["found_at"].isoformat() if row.get("found_at") else None,
+            "channel_id": _to_int(row.get("channel_id")),
+            "worker_identity": row.get("worker_identity"),
+            "blockhash": row.get("blockhash"),
+            "source": row.get("source"),
+            "reward_sats": _to_int(row.get("reward_sats")),
+            "reward_btc": _sats_to_btc_str(row.get("reward_sats")),
+        }
+        for row in block_rows
+    ]
+
+
+def _normalize_postgres_settlement_history_rows(
+    rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    normalized: list[dict[str, object]] = []
+    previous_payout_settlement_id: int | None = None
+    previous_payout_contributions: list[dict[str, object]] = []
+
+    for row in sorted(rows, key=lambda item: str(item.get("settlement_run_at") or ""), reverse=False):
+        credit_rows = list(row.get("user_credits") or [])
+        user_work_rows = list(row.get("user_work") or [])
+        block_rows = list(row.get("settlement_blocks") or [])
+        user_contributions = _postgres_history_user_contributions(user_work_rows)
+        payout_user_breakdown = _postgres_history_payout_breakdown(credit_rows, user_work_rows)
+        payout_count = len(credit_rows)
+        settlement_id = _to_int(row.get("sqlite_settlement_id"))
+        if settlement_id <= 0:
+            raise RuntimeError("Postgres settlement row is missing a public SQLite settlement id mapping.")
+
+        previous_payout_comparison: list[dict[str, object]] = []
+        if payout_count > 0:
+            previous_payout_comparison = _compare_with_previous_payout(
+                user_contributions,
+                previous_payout_contributions,
+            )
+
+        attempted_at = row["settlement_run_at"].isoformat() if row.get("settlement_run_at") else None
+        work_window_start = row["work_window_start"].isoformat() if row.get("work_window_start") else None
+        work_window_end = row["work_window_end"].isoformat() if row.get("work_window_end") else None
+        payout_total_sats = sum(_to_int(credit.get("amount_sats")) for credit in credit_rows)
+
+        normalized.append(
+            {
+                "attempt_id": None,
+                "attempted_at": attempted_at,
+                "period_start": work_window_start,
+                "period_end": work_window_end,
+                "contribution_window_start": work_window_start,
+                "contribution_window_end": work_window_end,
+                "settlement_id": settlement_id,
+                "status": row.get("status"),
+                "reward_mode": None,
+                "pool_reward_btc": _sats_to_btc_str(row.get("total_reward_sats")),
+                "carry_btc": None,
+                "total_shares": _to_int(row.get("total_shares")),
+                "total_work": _to_decimal_str(row.get("total_work") or "0"),
+                "snapshot_total_shares": _to_int(row.get("total_shares")),
+                "snapshot_total_work": _to_decimal_str(row.get("total_work") or "0"),
+                "user_count": len(credit_rows),
+                "payout_count": payout_count,
+                "payout_total_btc": _sats_to_btc_str(payout_total_sats),
+                "unrewarded_user_count": 0,
+                "interval_blocks": len(block_rows),
+                "computed_reward_btc": _sats_to_btc_str(row.get("total_reward_sats")),
+                "settlement_reward_btc": _sats_to_btc_str(row.get("total_reward_sats")),
+                "block_rows": _postgres_history_block_rows(block_rows),
+                "payout_user_breakdown": payout_user_breakdown,
+                "interval_ratio_rows": _build_interval_ratio_rows(user_contributions),
+                "work_delta_explanation": _build_work_delta_explanation({}),
+                "last_payout_settlement_id": previous_payout_settlement_id,
+                "last_payout_contributions": previous_payout_contributions,
+                "payout_vs_last_payout": previous_payout_comparison,
+                "raw": {
+                    "read_source": "postgres",
+                    "settlement_window_id": _to_int(row.get("id")),
+                },
+            }
+        )
+
+        if payout_count > 0:
+            previous_payout_settlement_id = settlement_id
+            previous_payout_contributions = list(user_contributions)
+
+    normalized.sort(key=lambda item: str(item.get("attempted_at") or ""), reverse=True)
+    return normalized
+
+
+def _read_postgres_settlement_history(*, limit: int) -> dict:
+    rows = _postgres_settlement_history_rows(limit)
+    normalized = _normalize_postgres_settlement_history_rows(rows)
+    settings = load_settings()
+    return {
+        "log_path": None,
+        "exists": True,
+        "entry_count": len(normalized),
+        "invalid_line_count": 0,
+        "scheduler_enabled": bool(settings.scheduler_enabled),
+        "scheduler_interval_seconds": int(settings.scheduler_interval_seconds),
+        "scheduler_events": [],
         "settlements": normalized,
     }
 
@@ -1320,20 +1604,50 @@ def audit_dashboard() -> HTMLResponse:
 
 
 @app.get("/settlements/latest")
-def latest_settlement() -> dict:
+def latest_settlement():
+    settings = load_settings()
+    endpoint_id = POSTGRES_READ_ENDPOINT_SETTLEMENT_DETAIL
     with _new_session() as session:
-        settlement = session.execute(
-            select(Settlement).order_by(Settlement.period_end.desc(), Settlement.id.desc())
-        ).scalar_one_or_none()
-        if settlement is None:
-            return {"settlement": None, "users": []}
+        use_postgres = _should_use_postgres_candidate_read(settings, endpoint_id, session)
+        if use_postgres:
+            try:
+                payload = _read_postgres_latest_settlement()
+                payload["read_diagnostics"] = _postgres_read_diagnostics(
+                    read_source="postgres",
+                    effective_read_mode=settings.effective_postgres_read_mode,
+                    fallback_used=False,
+                    endpoint_id=endpoint_id,
+                )
+                return payload
+            except Exception:
+                if not settings.postgres_ledger_read_fallback_to_sqlite:
+                    return _postgres_read_error_response(settings, endpoint_id)
 
-        rows = session.execute(
-            select(UserPayout, User)
-            .join(User, User.id == UserPayout.user_id)
-            .where(UserPayout.settlement_id == settlement.id)
-            .order_by(User.username.asc(), UserPayout.id.asc())
-        ).all()
+                payload = _read_sqlite_latest_settlement(session)
+                payload["read_diagnostics"] = _postgres_read_diagnostics(
+                    read_source="sqlite_fallback",
+                    effective_read_mode=settings.effective_postgres_read_mode,
+                    fallback_used=True,
+                    endpoint_id=endpoint_id,
+                )
+                return payload
+
+        return _read_sqlite_latest_settlement(session)
+
+
+def _read_sqlite_latest_settlement(session: Session) -> dict:
+    settlement = session.execute(
+        select(Settlement).order_by(Settlement.period_end.desc(), Settlement.id.desc())
+    ).scalar_one_or_none()
+    if settlement is None:
+        return {"settlement": None, "users": []}
+
+    rows = session.execute(
+        select(UserPayout, User)
+        .join(User, User.id == UserPayout.user_id)
+        .where(UserPayout.settlement_id == settlement.id)
+        .order_by(User.username.asc(), UserPayout.id.asc())
+    ).all()
 
     return {
         "settlement": {
@@ -1354,6 +1668,54 @@ def latest_settlement() -> dict:
                 "status": payout.status,
             }
             for payout, user in rows
+        ],
+    }
+
+
+def _read_postgres_latest_settlement() -> dict:
+    rows = _postgres_settlement_history_rows(1)
+    if not rows:
+        return {"settlement": None, "users": []}
+
+    row = rows[0]
+    settlement_id = _to_int(row.get("sqlite_settlement_id"))
+    if settlement_id <= 0:
+        raise RuntimeError("Postgres settlement row is missing a public SQLite settlement id mapping.")
+
+    credit_rows = list(row.get("user_credits") or [])
+    user_work_rows = list(row.get("user_work") or [])
+    work_by_username = {str(work.get("username") or ""): work for work in user_work_rows}
+    return {
+        "settlement": {
+            "settlement_id": settlement_id,
+            "status": row.get("status"),
+            "period_start": row["work_window_start"].isoformat() if row.get("work_window_start") else None,
+            "period_end": row["work_window_end"].isoformat() if row.get("work_window_end") else None,
+            "pool_reward_btc": _sats_to_btc_str(row.get("total_reward_sats")),
+            "total_shares": _to_int(row.get("total_shares")),
+            "total_work": _to_decimal_str(row.get("total_work") or "0"),
+        },
+        "users": [
+            {
+                "username": str(credit.get("username") or ""),
+                "contribution_value": _to_decimal_str(
+                    (
+                        work_by_username.get(str(credit.get("username") or ""), {}).get("work_delta")
+                        if Decimal(
+                            str(work_by_username.get(str(credit.get("username") or ""), {}).get("work_delta") or "0")
+                        )
+                        > 0
+                        else work_by_username.get(str(credit.get("username") or ""), {}).get("share_delta", 0)
+                    )
+                    or "0"
+                ),
+                "payout_fraction": str(
+                    work_by_username.get(str(credit.get("username") or ""), {}).get("payout_fraction") or "0"
+                ),
+                "amount_btc": _sats_to_btc_str(credit.get("amount_sats")),
+                "status": credit.get("status"),
+            }
+            for credit in credit_rows
         ],
     }
 
