@@ -1385,6 +1385,20 @@ def audit_postgres_shadow_endpoint(
     return JSONResponse(status_code=status_code, content=payload)
 
 
+@app.get("/postgres-shadow/read-mode")
+@app.get("/v1/postgres-shadow/read-mode")
+def postgres_shadow_read_mode_endpoint() -> dict[str, object]:
+    settings = load_settings()
+    return {
+        "configured_mode": settings.postgres_ledger_read_mode,
+        "effective_mode": settings.effective_postgres_read_mode,
+        "reads_enabled": settings.postgres_ledger_reads_enabled,
+        "fallback_enabled": settings.postgres_ledger_read_fallback_to_sqlite,
+        "require_shadow_match": settings.postgres_ledger_read_require_shadow_match,
+        "allowed_endpoints": list(settings.postgres_ledger_read_allowed_endpoints),
+    }
+
+
 @app.post("/settlements/run")
 def run_settlement_cycle() -> dict:
     return _execute_settlement_cycle(force_settlement=True)

@@ -11,6 +11,16 @@ if (PROJECT_ROOT / ".env").exists():
 
 DEFAULT_DB_PATH = str(PROJECT_ROOT / "payouts.db")
 DEFAULT_AUDIT_LOG_PATH = str(PROJECT_ROOT / "logs" / "payout_audit.jsonl")
+POSTGRES_LEDGER_READ_MODE_SQLITE = "sqlite"
+POSTGRES_LEDGER_READ_MODE_SHADOW_CANDIDATE = "postgres_shadow_candidate"
+POSTGRES_LEDGER_READ_MODE_AUTHORITATIVE = "postgres_authoritative"
+VALID_POSTGRES_LEDGER_READ_MODES = frozenset(
+    {
+        POSTGRES_LEDGER_READ_MODE_SQLITE,
+        POSTGRES_LEDGER_READ_MODE_SHADOW_CANDIDATE,
+        POSTGRES_LEDGER_READ_MODE_AUTHORITATIVE,
+    }
+)
 
 
 def _resolve_path(path_value: str, default_path: str) -> str:
@@ -32,6 +42,20 @@ def _parse_env_bool(value: str | None, default: bool = False) -> bool:
     if normalized in {"0", "false", "no", "n", "off"}:
         return False
     return default
+
+
+def _parse_postgres_ledger_read_mode(value: str | None) -> str:
+    mode = (value or POSTGRES_LEDGER_READ_MODE_SQLITE).strip() or POSTGRES_LEDGER_READ_MODE_SQLITE
+    if mode not in VALID_POSTGRES_LEDGER_READ_MODES:
+        valid = ", ".join(sorted(VALID_POSTGRES_LEDGER_READ_MODES))
+        raise ValueError(f"Invalid POSTGRES_LEDGER_READ_MODE {mode!r}; expected one of: {valid}")
+    return mode
+
+
+def _parse_endpoint_list(value: str | None) -> tuple[str, ...]:
+    if not value:
+        return ()
+    return tuple(endpoint for endpoint in (item.strip() for item in value.split(",")) if endpoint)
 
 
 @dataclass(frozen=True)
@@ -68,6 +92,25 @@ class Settings:
     db_path: str = DEFAULT_DB_PATH
     dry_run: bool = True
     postgres_ledger_shadow_write_enabled: bool = False
+    postgres_ledger_reads_enabled: bool = False
+    postgres_ledger_read_fallback_to_sqlite: bool = True
+    postgres_ledger_read_require_shadow_match: bool = True
+    postgres_ledger_read_allowed_endpoints: tuple[str, ...] = ()
+    postgres_ledger_read_mode: str = POSTGRES_LEDGER_READ_MODE_SQLITE
+
+    @property
+    def effective_postgres_read_mode(self) -> str:
+        if not self.postgres_ledger_reads_enabled:
+            return POSTGRES_LEDGER_READ_MODE_SQLITE
+        return self.postgres_ledger_read_mode
+
+    @property
+    def postgres_reads_enabled(self) -> bool:
+        return self.postgres_ledger_reads_enabled
+
+    @property
+    def postgres_read_allowed_endpoints(self) -> frozenset[str]:
+        return frozenset(self.postgres_ledger_read_allowed_endpoints)
 
 
 def load_settings() -> Settings:
@@ -138,5 +181,23 @@ def load_settings() -> Settings:
         postgres_ledger_shadow_write_enabled=_parse_env_bool(
             os.getenv("POSTGRES_LEDGER_SHADOW_WRITE_ENABLED"),
             default=False,
+        ),
+        postgres_ledger_reads_enabled=_parse_env_bool(
+            os.getenv("POSTGRES_LEDGER_READS_ENABLED"),
+            default=False,
+        ),
+        postgres_ledger_read_fallback_to_sqlite=_parse_env_bool(
+            os.getenv("POSTGRES_LEDGER_READ_FALLBACK_TO_SQLITE"),
+            default=True,
+        ),
+        postgres_ledger_read_require_shadow_match=_parse_env_bool(
+            os.getenv("POSTGRES_LEDGER_READ_REQUIRE_SHADOW_MATCH"),
+            default=True,
+        ),
+        postgres_ledger_read_allowed_endpoints=_parse_endpoint_list(
+            os.getenv("POSTGRES_LEDGER_READ_ALLOWED_ENDPOINTS", "")
+        ),
+        postgres_ledger_read_mode=_parse_postgres_ledger_read_mode(
+            os.getenv("POSTGRES_LEDGER_READ_MODE", POSTGRES_LEDGER_READ_MODE_SQLITE)
         ),
     )
