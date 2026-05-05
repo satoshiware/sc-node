@@ -13,11 +13,18 @@ from node_api.services import translator_logs as tl
 from node_api.settings import Settings
 
 _BLOCK_FOUND_PHRASE = "block found"
-_MONEY_BAG = "\U0001f4b0"
 _HEX_64_RE = re.compile(r"\b[0-9a-fA-F]{64}\b")
 _ISO_TS_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
     r"(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?"
+)
+_EXCLUDED_PREV_HASH_MARKERS = ("setnewprevhash", "prev_hash")
+_CANDIDATE_BLOCK_MARKERS = (
+    _BLOCK_FOUND_PHRASE,
+    "candidate block",
+    "candidate_block",
+    "submitted block",
+    "submit block",
 )
 _JOURNALCTL_TIMEOUT_SECONDS = 3.0
 _AZTRANSLATOR_SERVICE = "aztranslator.service"
@@ -31,7 +38,7 @@ class TranslatorBlockRewardEventsConfigError(RuntimeError):
 class TranslatorBlockFoundProof:
     found_time: int
     found_time_iso: str
-    raw_hash: str
+    blockhash: str
     source: Literal["aztranslator_journal", "translator_log"]
     raw_log_line: str
 
@@ -78,7 +85,9 @@ def parse_block_found_proof_line(
 ) -> TranslatorBlockFoundProof | None:
     line = raw_line.rstrip("\r\n")
     lowered = line.lower()
-    if _BLOCK_FOUND_PHRASE not in lowered and _MONEY_BAG not in line:
+    if any(marker in lowered for marker in _EXCLUDED_PREV_HASH_MARKERS):
+        return None
+    if not any(marker in lowered for marker in _CANDIDATE_BLOCK_MARKERS):
         return None
 
     hashes = _HEX_64_RE.findall(line)
@@ -93,7 +102,7 @@ def parse_block_found_proof_line(
     return TranslatorBlockFoundProof(
         found_time=found_time,
         found_time_iso=found_time_iso,
-        raw_hash=hashes[0].lower(),
+        blockhash=hashes[0].lower(),
         source=source,
         raw_log_line=line,
     )
@@ -169,9 +178,8 @@ def _event_from_proof(proof: TranslatorBlockFoundProof) -> dict[str, Any]:
     return {
         "found_time": proof.found_time,
         "found_time_iso": proof.found_time_iso,
-        "raw_hash": proof.raw_hash,
-        "blockhash": proof.raw_hash,
-        "proof_type": "translator_block_found_log",
+        "blockhash": proof.blockhash,
+        "proof_type": "translator_candidate_block_log",
         "source": proof.source,
         "raw_log_line": proof.raw_log_line,
     }

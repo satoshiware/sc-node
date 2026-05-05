@@ -240,9 +240,8 @@ class TranslatorBlockRewardEventItem(BaseModel):
 
     found_time: int
     found_time_iso: str
-    raw_hash: str
     blockhash: str
-    proof_type: Literal["translator_block_found_log"]
+    proof_type: Literal["translator_candidate_block_log"]
     source: Literal["aztranslator_journal", "translator_log"]
     raw_log_line: str | None = None
 
@@ -484,10 +483,10 @@ def translator_block_reward_events(
 ) -> dict[str, Any]:
     """Translator block-found proof lines only.
 
-    This endpoint parses out-of-box translator/JD-client log or journal lines
-    containing ``Block Found`` or the money-bag marker and one 64-hex hash. It
-    does not perform payout readiness, reward ownership matching, coinbase
-    verification, maturity checks, or chain reward fallback.
+    This endpoint parses translator/JD-client log or journal lines that
+    explicitly indicate a candidate/block-found submission and contain one
+    64-hex block hash. It does not perform payout readiness, reward ownership
+    matching, coinbase verification, maturity checks, or chain reward fallback.
     """
     return TranslatorBlockRewardEventsResponse.model_validate(
         tbre.block_reward_events_payload(
