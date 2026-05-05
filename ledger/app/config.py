@@ -67,6 +67,7 @@ class Settings:
     scheduler_interval_seconds: int = 60
     db_path: str = DEFAULT_DB_PATH
     dry_run: bool = True
+    postgres_ledger_shadow_write_enabled: bool = False
 
 
 def load_settings() -> Settings:
@@ -134,4 +135,8 @@ def load_settings() -> Settings:
         scheduler_interval_seconds=int(os.getenv("SCHEDULER_INTERVAL_SECONDS", "60")),
         db_path=resolved_db_path,
         dry_run=_parse_env_bool(os.getenv("DRY_RUN"), default=True),
+        postgres_ledger_shadow_write_enabled=_parse_env_bool(
+            os.getenv("POSTGRES_LEDGER_SHADOW_WRITE_ENABLED"),
+            default=False,
+        ),
     )
