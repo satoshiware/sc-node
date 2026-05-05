@@ -170,8 +170,11 @@ def _mismatch(field: str, sqlite_value: object, postgres_value: object, message:
 def compare_postgres_shadow_settlement(
     session: Session,
     settlement_id: int,
+    *,
+    repository: PostgresLedgerRepository | None = None,
+    checked_at: str | None = None,
 ) -> tuple[dict[str, object], int]:
-    checked_at = datetime.now(UTC).isoformat()
+    effective_checked_at = checked_at or datetime.now(UTC).isoformat()
     context = _load_sqlite_settlement_context(session, settlement_id)
     if context is None:
         return (
@@ -187,7 +190,7 @@ def compare_postgres_shadow_settlement(
                         "message": f"SQLite settlement {settlement_id} was not found.",
                     }
                 ],
-                "checked_at": checked_at,
+                "checked_at": effective_checked_at,
             },
             404,
         )
@@ -195,8 +198,8 @@ def compare_postgres_shadow_settlement(
     sqlite_summary = _sqlite_summary(context)
 
     try:
-        repository = get_postgres_shadow_compare_repository()
-        postgres_summary = _postgres_summary(repository, context)
+        effective_repository = repository or get_postgres_shadow_compare_repository()
+        postgres_summary = _postgres_summary(effective_repository, context)
     except PostgresShadowCompareError as exc:
         return (
             {
@@ -207,7 +210,7 @@ def compare_postgres_shadow_settlement(
                 "postgres_summary": None,
                 "mismatches": [],
                 "error": str(exc),
-                "checked_at": checked_at,
+                "checked_at": effective_checked_at,
             },
             503,
         )
@@ -221,7 +224,7 @@ def compare_postgres_shadow_settlement(
                 "postgres_summary": None,
                 "mismatches": [],
                 "error": f"Postgres comparison query failed: {exc}",
-                "checked_at": checked_at,
+                "checked_at": effective_checked_at,
             },
             503,
         )
@@ -235,7 +238,7 @@ def compare_postgres_shadow_settlement(
                 "sqlite_summary": sqlite_summary,
                 "postgres_summary": None,
                 "mismatches": [],
-                "checked_at": checked_at,
+                "checked_at": effective_checked_at,
             },
             200,
         )
@@ -324,6 +327,146 @@ def compare_postgres_shadow_settlement(
             "sqlite_summary": sqlite_summary,
             "postgres_summary": postgres_summary,
             "mismatches": mismatches,
+            "checked_at": effective_checked_at,
+        },
+        200,
+    )
+
+
+def _audit_row_from_comparison(
+    comparison: dict[str, object],
+    *,
+    include_details: bool,
+) -> dict[str, object]:
+    sqlite_summary = comparison.get("sqlite_summary") or {}
+    row = {
+        "settlement_id": comparison["settlement_id"],
+        "period_start": sqlite_summary.get("period_start"),
+        "period_end": sqlite_summary.get("period_end"),
+        "status": sqlite_summary.get("status"),
+        "comparison_status": comparison["comparison_status"],
+        "mismatch_count": len(comparison.get("mismatches") or []),
+    }
+    if comparison.get("error"):
+        row["error"] = comparison["error"]
+    if include_details:
+        row["mismatches"] = comparison.get("mismatches") or []
+    return row
+
+
+def _audit_summary_status(
+    *,
+    total_checked: int,
+    matched_count: int,
+    mismatched_count: int,
+    not_found_count: int,
+    error_count: int,
+) -> str:
+    if error_count > 0:
+        return "error"
+    if total_checked == 0:
+        return "matched"
+    if matched_count == total_checked:
+        return "matched"
+    if not_found_count == total_checked:
+        return "not_found"
+    return "mismatched"
+
+
+def audit_postgres_shadow_settlements(
+    session: Session,
+    *,
+    limit: int = 100,
+    offset: int = 0,
+    status_filter: str | None = None,
+    include_details: bool = False,
+) -> tuple[dict[str, object], int]:
+    checked_at = datetime.now(UTC).isoformat()
+
+    try:
+        repository = get_postgres_shadow_compare_repository()
+    except PostgresShadowCompareError as exc:
+        return (
+            {
+                "status": "error",
+                "comparison_status": "error",
+                "limit": limit,
+                "offset": offset,
+                "status_filter": status_filter,
+                "include_details": include_details,
+                "total_checked": 0,
+                "matched_count": 0,
+                "mismatched_count": 0,
+                "not_found_count": 0,
+                "error_count": 1,
+                "rows": [],
+                "error": str(exc),
+                "checked_at": checked_at,
+            },
+            503,
+        )
+
+    settlements = session.execute(
+        select(Settlement)
+        .order_by(Settlement.period_end.desc(), Settlement.id.desc())
+        .offset(offset)
+        .limit(limit)
+    ).scalars().all()
+
+    rows: list[dict[str, object]] = []
+    matched_count = 0
+    mismatched_count = 0
+    not_found_count = 0
+    error_count = 0
+
+    for settlement in settlements:
+        comparison, _ = compare_postgres_shadow_settlement(
+            session,
+            int(settlement.id),
+            repository=repository,
+            checked_at=checked_at,
+        )
+        comparison_status = str(comparison["comparison_status"])
+        if comparison_status == "matched":
+            matched_count += 1
+        elif comparison_status == "mismatched":
+            mismatched_count += 1
+        elif comparison_status == "not_found":
+            not_found_count += 1
+        elif comparison_status == "error":
+            error_count += 1
+
+        if status_filter and comparison_status != status_filter:
+            continue
+
+        rows.append(
+            _audit_row_from_comparison(
+                comparison,
+                include_details=include_details,
+            )
+        )
+
+    total_checked = matched_count + mismatched_count + not_found_count + error_count
+    return (
+        {
+            "status": "ok",
+            "comparison_status": _audit_summary_status(
+                total_checked=total_checked,
+                matched_count=matched_count,
+                mismatched_count=mismatched_count,
+                not_found_count=not_found_count,
+                error_count=error_count,
+            ),
+            "limit": limit,
+            "offset": offset,
+            "status_filter": status_filter,
+            "include_details": include_details,
+            "total_checked": total_checked,
+            "matched_count": matched_count,
+            "mismatched_count": mismatched_count,
+            "not_found_count": not_found_count,
+            "error_count": error_count,
+            "rows": rows,
             "checked_at": checked_at,
         },
         200,

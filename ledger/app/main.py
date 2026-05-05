@@ -8,7 +8,7 @@ import uuid
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from app.audit import (
@@ -33,7 +33,10 @@ from app.poller import poll_channels_once_with_blocks, poll_metrics_once, upsert
 from app.pool_client import PoolApiError, fetch_block_rewards_by_hashes, fetch_blocks_found_in_window
 from app.postgres_db import make_postgres_engine, make_postgres_session_factory
 from app.postgres_repositories import PostgresLedgerRepository
-from app.postgres_shadow_compare import compare_postgres_shadow_settlement
+from app.postgres_shadow_compare import (
+    audit_postgres_shadow_settlements,
+    compare_postgres_shadow_settlement,
+)
 from app.reward_contract import compute_matured_window
 from app.scheduler import start_scheduler, stop_scheduler
 from app.sender import process_payout_events
@@ -1360,6 +1363,25 @@ def latest_settlement() -> dict:
 def compare_postgres_shadow_endpoint(settlement_id: int) -> JSONResponse:
     with _new_session() as session:
         payload, status_code = compare_postgres_shadow_settlement(session, settlement_id)
+    return JSONResponse(status_code=status_code, content=payload)
+
+
+@app.get("/postgres-shadow/settlements/audit")
+@app.get("/v1/postgres-shadow/settlements/audit")
+def audit_postgres_shadow_endpoint(
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    status_filter: str | None = Query(default=None, pattern="^(matched|mismatched|not_found|error)$"),
+    include_details: bool = False,
+) -> JSONResponse:
+    with _new_session() as session:
+        payload, status_code = audit_postgres_shadow_settlements(
+            session,
+            limit=limit,
+            offset=offset,
+            status_filter=status_filter,
+            include_details=include_details,
+        )
     return JSONResponse(status_code=status_code, content=payload)
 
 
