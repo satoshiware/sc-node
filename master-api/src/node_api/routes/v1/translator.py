@@ -238,35 +238,21 @@ class TranslatorBlocksFoundCandidatesResponse(BaseModel):
 class TranslatorBlockRewardEventItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    found_time: int | None = None
-    found_time_iso: str | None = None
-    proof_type: Literal["translator_block_found_share_hash", "chain_coinbase_reward"]
-    raw_share_hash: str | None = None
-    blockhash: str | None = None
-    matched_blockhash: str | None = None
-    hash_match_method: Literal["direct", "byte_reversed"] | None = None
-    chain_status: Literal["matched", "not_found", "not_main_chain", "immature"]
-    coinbase_total_sats: int | None = None
-    confirmations: int | None = None
-    maturity_status: str | None = None
-    is_on_main_chain: bool
-    payout_ready: bool
-    source: Literal["aztranslator_journal", "translator_log", "azcoin_core_reward_ownership"]
+    found_time: int
+    found_time_iso: str
+    raw_hash: str
+    blockhash: str
+    proof_type: Literal["translator_block_found_log"]
+    source: Literal["aztranslator_journal", "translator_log"]
     raw_log_line: str | None = None
 
 
 class TranslatorBlockRewardEventsResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    status: Literal["ok", "blocked", "error"]
-    source: Literal["aztranslator_journal", "translator_log", "azcoin_core_reward_ownership"]
-    blocked_reason: str | None = None
+    status: Literal["ok"]
+    source: Literal["aztranslator_journal", "translator_log"]
     total: int
-    matched_count: int
-    payout_ready_count: int
-    not_found_count: int
-    immature_count: int
-    source_attempts: list[str]
     items: list[TranslatorBlockRewardEventItem]
 
 
@@ -479,33 +465,29 @@ def translator_block_reward_events(
         default=None,
         ge=0,
         description=(
-            "Inclusive lower bound (Unix seconds) for chain reward fallback. "
-            "Must be supplied together with end_time."
+            "Accepted for backward compatibility; ignored. This endpoint only "
+            "reads translator block-found proof lines."
         ),
     ),
     end_time: int | None = Query(
         default=None,
         ge=0,
         description=(
-            "Exclusive upper bound (Unix seconds) for chain reward fallback. "
-            "Must be supplied together with start_time."
+            "Accepted for backward compatibility; ignored. This endpoint only "
+            "reads translator block-found proof lines."
         ),
     ),
     time_field: Literal["time", "mediantime"] = Query(
         default="time",
-        description="Block timestamp field used by chain reward fallback interval filtering.",
+        description="Accepted for backward compatibility; ignored.",
     ),
 ) -> dict[str, Any]:
-    """Production block reward events from translator proof or owned chain rewards.
+    """Translator block-found proof lines only.
 
-    This endpoint parses the out-of-box translator/JD-client log or journal
-    lines that include ``Block Found`` and the submitted share hash, then
-    verifies that hash against chain reward truth. If that source has no
-    block-found proof lines, it falls back to AZCoin Core reward ownership
-    using the same coinbase-output matching configuration as
-    ``/v1/az/blocks/rewards?owned_only=true``. Timestamp correlation from
-    ``/translator/blocks-found?include_candidate_blocks=true`` remains
-    diagnostic only and must not drive payout readiness.
+    This endpoint parses out-of-box translator/JD-client log or journal lines
+    containing ``Block Found`` or the money-bag marker and one 64-hex hash. It
+    does not perform payout readiness, reward ownership matching, coinbase
+    verification, maturity checks, or chain reward fallback.
     """
     return TranslatorBlockRewardEventsResponse.model_validate(
         tbre.block_reward_events_payload(
