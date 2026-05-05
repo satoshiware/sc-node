@@ -43,6 +43,7 @@ def _candidate_blocks_for_event(
                 "coinbase_total_sats": block.get("coinbase_total_sats"),
                 "maturity_status": block.get("maturity_status"),
                 "confirmations": block.get("confirmations"),
+                "is_on_main_chain": _is_on_main_chain(block),
             }
         )
 
@@ -58,11 +59,47 @@ def _candidate_blocks_for_event(
     enriched["candidate_window_seconds"] = candidate_window_seconds
     enriched["candidate_time_field"] = candidate_time_field
     enriched["candidate_count"] = len(matches)
+    enriched["candidate_coinbase_total_sats"] = None
+    enriched["payout_ready"] = False
     enriched["nearest_candidate_blockhash"] = (
         returned_matches[0]["blockhash"] if returned_matches else None
     )
     enriched["candidate_blocks"] = returned_matches
+    if len(matches) == 1:
+        candidate = matches[0]
+        blockhash = candidate.get("blockhash")
+        if blockhash is not None:
+            enriched["blockhash"] = blockhash
+            enriched["blockhash_status"] = "resolved"
+            enriched["correlation_status"] = "resolved_to_blockhash"
+        enriched["candidate_coinbase_total_sats"] = candidate.get("coinbase_total_sats")
+        enriched["payout_ready"] = _is_payout_ready(candidate)
+    elif len(matches) > 1:
+        enriched["blockhash"] = None
+        enriched["blockhash_status"] = "ambiguous"
+        enriched["correlation_status"] = "candidate_multiple_ambiguous"
     return enriched
+
+
+def _is_on_main_chain(block: dict[str, Any]) -> bool:
+    value = block.get("is_on_main_chain")
+    if isinstance(value, bool):
+        return value
+    confirmations = block.get("confirmations")
+    return (
+        isinstance(confirmations, int)
+        and not isinstance(confirmations, bool)
+        and confirmations >= 0
+    )
+
+
+def _is_payout_ready(candidate: dict[str, Any]) -> bool:
+    return (
+        candidate.get("blockhash") is not None
+        and candidate.get("coinbase_total_sats") is not None
+        and candidate.get("maturity_status") == "mature"
+        and candidate.get("is_on_main_chain") is True
+    )
 
 
 def enrich_events_with_candidate_blocks(

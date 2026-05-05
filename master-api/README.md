@@ -162,7 +162,7 @@ Notes:
 - **GET** `/v1/translator/status` (protected; merged health: log file panel plus optional live monitoring probe; overall `status` is `ok`, `degraded`, or `unconfigured`)
 - **GET** `/v1/translator/summary` (protected; log-backed status plus level/category counts over the log tail; query: `lines` default `500`, max `2000`)
 - **GET** `/v1/translator/miner-work/snapshot` (protected; ledger-ready normalized join of `/upstream/channels` and `/downstreams` keyed by `channel_id`; ledger-sensitive numerics like `share_work_sum` / `best_diff` / `hashrate` are returned as strings; fail-closed when either side is unreachable; see [`docs/api/ledger-mvp-endpoints.md`](docs/api/ledger-mvp-endpoints.md) section 5)
-- **GET** `/v1/translator/blocks-found` (protected; durable API-side translator `blocks_found` counter-delta evidence persisted by the poller; newest-first history over `detected_time`; this does **not** prove chain reward maturity or execute payouts; ledger must still verify rewards through `/v1/az/blocks/rewards`; `channel_id` is metadata only and not payout identity)
+- **GET** `/v1/translator/blocks-found` (protected; durable API-side translator `blocks_found` counter-delta evidence persisted by the poller; newest-first history over `detected_time`; candidate correlation defaults to a payout-safe 90-second window when `include_candidate_blocks=true`; wider windows such as 180 or 300 seconds are diagnostic/manual-review only because they may produce multiple candidate blocks; `channel_id` is metadata only and not payout identity)
 - **GET** `/v1/translator/logs/tail` (protected; newest-first normalized records from the translator log tail; query: `lines`, optional `level`, `contains`)
 - **GET** `/v1/translator/events/recent` (protected; newest-first normalized records; query: `limit`, optional `category`, `level`, `contains`)
 - **GET** `/v1/translator/errors/recent` (protected; newest-first `WARN`/`ERROR` records; query: `limit`)
@@ -179,7 +179,16 @@ Deprecated routes (kept for diagnostics; OpenAPI marks them with `deprecated: tr
 
 Log-backed translator routes reflect **historical** lines from `TRANSLATOR_LOG_PATH` (tail, incidents, aggregates). Monitoring-backed routes reflect **live** translator process state from `TRANSLATOR_MONITORING_BASE_URL` only on a fixed allowlist (no generic proxy). The API does not add config writes, restarts, Prometheus passthrough, or arbitrary upstream paths.
 
-`GET /v1/translator/blocks-found` reads durable API-owned SQLite evidence produced by the translator block-found poller rather than re-scraping logs or querying `journalctl` on request. Each row proves only that a translator-side `blocks_found` counter increased for a stable miner identity at `detected_time`. It does not prove exact blockhash, chain inclusion, reward maturity, payout eligibility, wallet movement, or any payout decision unless separate direct evidence is correlated later.
+`GET /v1/translator/blocks-found` reads durable API-owned SQLite evidence produced by the translator block-found poller rather than re-scraping logs or querying `journalctl` on request. Each row proves only that a translator-side `blocks_found` counter increased for a stable miner identity at `detected_time`. With `include_candidate_blocks=true`, the default `candidate_window_seconds=90` is the payout-safe strict correlation window. Wider windows such as 180 or 300 seconds are diagnostic/manual-review only because they may return multiple nearby reward candidates.
+
+Automatic ledger crediting must ingest only rows where all of the following are true:
+
+- `blockhash_status == "resolved"`
+- `correlation_status == "resolved_to_blockhash"`
+- `candidate_count == 1`
+- `blockhash != null`
+- `candidate_coinbase_total_sats != null`
+- `payout_ready == true`
 
 For `/v1/az/wallet/transactions` with `since`:
 - Invalid `since` format returns `422` with `AZ_INVALID_SINCE`.

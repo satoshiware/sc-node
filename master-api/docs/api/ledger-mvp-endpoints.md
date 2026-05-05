@@ -460,8 +460,10 @@ The endpoint inherits the translator passthrough error model:
   `include_candidate_blocks=true`, the route may attach nearby
   chain-reward block candidates selected from a single combined
   `/v1/az/blocks/rewards` time-window lookup across all returned
-  events. These candidate rows are **supplemental diagnostic evidence
-  only**.
+  events. The payout-safe strict default is
+  `candidate_window_seconds=90`. Wider windows such as 180 or 300
+  seconds are diagnostic/manual-review only because they may produce
+  multiple candidates for one event.
 - **Source:** this API's SQLite store at
   `TRANSLATOR_BLOCKS_FOUND_DB_PATH`, populated by
   `python -m node_api.services.translator_blocks_found_poller`.
@@ -472,22 +474,28 @@ The endpoint inherits the translator passthrough error model:
   inclusion, block reward maturity, payout eligibility, wallet
   movement, or an exact blockhash. The ledger must still verify rewards
   through `/v1/az/blocks/rewards`.
-- **Exact-evidence rule:** `blockhash` remains reserved for exact
-  verified blockhash evidence from the translator / pool path. A
-  time-window candidate match must never make `blockhash` non-null by
-  itself.
 - **Identity rule:** `worker_identity` / `authorized_worker_name` is the
   miner identity. `channel_id` is metadata only and must not be used as
   payout identity because reconnects can move the same miner to a new
   channel id.
-- **Current correlation status:** the initial implementation is
-  `counter_delta_only`; `blockhash` remains null and
-  `blockhash_status="unresolved"` unless direct evidence is added in a
-  later revision.
-- **Candidate block rule:** `candidate_blocks` are time-window matches
-  on chain reward truth and must not be treated as payout proof or
-  settlement truth. Operators may use them for review, but ledger
-  settlement must still wait for future exact evidence.
+- **Strict correlation rule:** with `include_candidate_blocks=true`,
+  exactly one nearby chain-reward candidate resolves the response row to
+  `blockhash_status="resolved"` and
+  `correlation_status="resolved_to_blockhash"`. Multiple nearby
+  candidates leave `blockhash=null` and return
+  `blockhash_status="ambiguous"` with
+  `correlation_status="candidate_multiple_ambiguous"`.
+- **Payout-safe ingestion rule:** ledger auto-crediting must ingest only
+  rows where all of the following are true:
+  `blockhash_status=="resolved"`,
+  `correlation_status=="resolved_to_blockhash"`,
+  `candidate_count==1`,
+  `blockhash!=null`,
+  `candidate_coinbase_total_sats!=null`,
+  and `payout_ready==true`.
+- **Candidate block rule:** `candidate_blocks` remain time-window
+  correlation evidence, not settlement execution. Wider diagnostic
+  windows can legitimately produce ambiguity and require manual review.
 - **Candidate count rule:** `candidate_count` reflects the full number
   of time-window matches before any per-event `candidate_limit_per_event`
   truncation is applied.

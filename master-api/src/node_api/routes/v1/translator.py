@@ -192,12 +192,15 @@ class TranslatorBlocksFoundCandidateBlock(BaseModel):
     coinbase_total_sats: int | None = None
     maturity_status: str | None = None
     confirmations: int | None = None
+    is_on_main_chain: bool | None = None
 
 
 class TranslatorBlocksFoundCandidateEventItem(TranslatorBlocksFoundEventItem):
     candidate_window_seconds: int
     candidate_time_field: Literal["time", "mediantime"]
     candidate_count: int
+    candidate_coinbase_total_sats: int | None = None
+    payout_ready: bool = False
     nearest_candidate_blockhash: str | None = None
     candidate_blocks: list[TranslatorBlocksFoundCandidateBlock]
 
@@ -353,7 +356,16 @@ def translator_blocks_found(
     channel_id: int | None = Query(default=None),
     blockhash_status: str | None = Query(default=None),
     include_candidate_blocks: bool = Query(default=False),
-    candidate_window_seconds: int = Query(default=30, ge=1, le=3600),
+    candidate_window_seconds: int = Query(
+        default=90,
+        ge=1,
+        le=3600,
+        description=(
+            "Default: 90. Intended payout-safe strict correlation window. "
+            "Larger values may return ambiguous results and should not be "
+            "used for automatic payout crediting."
+        ),
+    ),
     candidate_time_field: Literal["time", "mediantime"] = Query(default="time"),
     candidate_limit_per_event: int = Query(default=10, ge=1, le=50),
 ) -> dict[str, Any]:
@@ -364,7 +376,10 @@ def translator_blocks_found(
     ``blocks_found`` counter increased for a worker identity; it does not
     prove chain inclusion, reward maturity, payout eligibility, or wallet
     movement. Ledger code must still verify rewards through
-    ``/v1/az/blocks/rewards``.
+    ``/v1/az/blocks/rewards``. When ``include_candidate_blocks=true``, the
+    payout-safe default correlation window is 90 seconds. Wider diagnostic
+    windows such as 180 or 300 seconds may return multiple nearby
+    candidates and must not be used for automatic payout crediting.
     """
     if (
         start_time is not None

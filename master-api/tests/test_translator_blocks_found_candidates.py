@@ -100,11 +100,75 @@ def test_include_candidate_blocks_true_with_zero_candidates(
     assert response.status_code == 200
     item = response.json()["items"][0]
     assert item["candidate_count"] == 0
+    assert item["candidate_window_seconds"] == 90
+    assert item["candidate_coinbase_total_sats"] is None
+    assert item["payout_ready"] is False
     assert item["nearest_candidate_blockhash"] is None
     assert item["candidate_blocks"] == []
 
 
-def test_exactly_one_candidate_returns_nearest_blockhash(
+def test_default_candidate_window_seconds_is_90_when_omitted(
+    monkeypatch, tmp_path: Path
+) -> None:
+    client = _client(monkeypatch, tmp_path)
+    _insert_event(client, monkeypatch, tmp_path, detected_time=1000)
+    calls: list[dict] = []
+
+    def _fake_block_rewards(**kwargs):
+        calls.append(kwargs)
+        return {"blocks": []}
+
+    monkeypatch.setattr(
+        "node_api.services.translator_blocks_found_candidates.az_blocks_route.block_rewards",
+        _fake_block_rewards,
+    )
+
+    response = client.get(
+        "/v1/translator/blocks-found",
+        params={"include_candidate_blocks": "true"},
+        headers={"Authorization": "Bearer testtoken"},
+    )
+
+    assert response.status_code == 200
+    assert len(calls) == 1
+    assert calls[0]["start_time"] == 910
+    assert calls[0]["end_time"] == 1090
+    assert response.json()["items"][0]["candidate_window_seconds"] == 90
+
+
+def test_explicit_candidate_window_seconds_300_is_preserved(
+    monkeypatch, tmp_path: Path
+) -> None:
+    client = _client(monkeypatch, tmp_path)
+    _insert_event(client, monkeypatch, tmp_path, detected_time=1000)
+    calls: list[dict] = []
+
+    def _fake_block_rewards(**kwargs):
+        calls.append(kwargs)
+        return {"blocks": []}
+
+    monkeypatch.setattr(
+        "node_api.services.translator_blocks_found_candidates.az_blocks_route.block_rewards",
+        _fake_block_rewards,
+    )
+
+    response = client.get(
+        "/v1/translator/blocks-found",
+        params={
+            "include_candidate_blocks": "true",
+            "candidate_window_seconds": 300,
+        },
+        headers={"Authorization": "Bearer testtoken"},
+    )
+
+    assert response.status_code == 200
+    assert len(calls) == 1
+    assert calls[0]["start_time"] == 700
+    assert calls[0]["end_time"] == 1300
+    assert response.json()["items"][0]["candidate_window_seconds"] == 300
+
+
+def test_exactly_one_candidate_returns_resolved_blockhash_but_not_payout_ready_when_immature(
     monkeypatch, tmp_path: Path
 ) -> None:
     client = _client(monkeypatch, tmp_path)
@@ -135,9 +199,54 @@ def test_exactly_one_candidate_returns_nearest_blockhash(
 
     assert response.status_code == 200
     item = response.json()["items"][0]
+    assert item["blockhash"] == "a" * 64
+    assert item["blockhash_status"] == "resolved"
+    assert item["correlation_status"] == "resolved_to_blockhash"
+    assert item["candidate_coinbase_total_sats"] == 5_000_000_000
+    assert item["payout_ready"] is False
     assert item["nearest_candidate_blockhash"] == "a" * 64
     assert item["candidate_count"] == 1
     assert item["candidate_blocks"][0]["blockhash"] == "a" * 64
+
+
+def test_exactly_one_candidate_returns_payout_ready_only_when_mature_main_chain_and_reward_present(
+    monkeypatch, tmp_path: Path
+) -> None:
+    client = _client(monkeypatch, tmp_path)
+    _insert_event(client, monkeypatch, tmp_path, detected_time=1000)
+
+    monkeypatch.setattr(
+        "node_api.services.translator_blocks_found_candidates.az_blocks_route.block_rewards",
+        lambda **kwargs: {
+            "blocks": [
+                {
+                    "height": 202,
+                    "blockhash": "e" * 64,
+                    "time": 1004,
+                    "mediantime": 1004,
+                    "coinbase_total_sats": 625000000,
+                    "maturity_status": "mature",
+                    "confirmations": 150,
+                    "is_on_main_chain": True,
+                }
+            ]
+        },
+    )
+
+    response = client.get(
+        "/v1/translator/blocks-found",
+        params={"include_candidate_blocks": "true"},
+        headers={"Authorization": "Bearer testtoken"},
+    )
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["blockhash"] == "e" * 64
+    assert item["blockhash_status"] == "resolved"
+    assert item["correlation_status"] == "resolved_to_blockhash"
+    assert item["candidate_coinbase_total_sats"] == 625_000_000
+    assert item["payout_ready"] is True
+    assert item["candidate_count"] == 1
 
 
 def test_multiple_candidates_are_sorted_by_abs_delta_seconds(
@@ -188,7 +297,13 @@ def test_multiple_candidates_are_sorted_by_abs_delta_seconds(
     )
 
     assert response.status_code == 200
-    blocks = response.json()["items"][0]["candidate_blocks"]
+    item = response.json()["items"][0]
+    assert item["blockhash"] is None
+    assert item["blockhash_status"] == "ambiguous"
+    assert item["correlation_status"] == "candidate_multiple_ambiguous"
+    assert item["candidate_coinbase_total_sats"] is None
+    assert item["payout_ready"] is False
+    blocks = item["candidate_blocks"]
     assert [block["blockhash"] for block in blocks] == ["a" * 64, "b" * 64, "c" * 64]
 
 
@@ -248,7 +363,7 @@ def test_candidate_limit_per_event_truncates_candidate_blocks(
     assert len(item["candidate_blocks"]) == 2
 
 
-def test_existing_blockhash_remains_null_for_candidate_only_enrichment(
+def test_no_candidates_preserve_unresolved_blockhash_fields(
     monkeypatch, tmp_path: Path
 ) -> None:
     client = _client(monkeypatch, tmp_path)
@@ -261,8 +376,8 @@ def test_existing_blockhash_remains_null_for_candidate_only_enrichment(
                 {
                     "height": 101,
                     "blockhash": "d" * 64,
-                    "time": 1005,
-                    "mediantime": 1005,
+                    "time": 1105,
+                    "mediantime": 1105,
                     "coinbase_total_sats": 5000000000,
                     "maturity_status": "immature",
                     "confirmations": 10,
@@ -282,6 +397,8 @@ def test_existing_blockhash_remains_null_for_candidate_only_enrichment(
     assert item["blockhash"] is None
     assert item["blockhash_status"] == "unresolved"
     assert item["correlation_status"] == "counter_delta_only"
+    assert item["candidate_coinbase_total_sats"] is None
+    assert item["payout_ready"] is False
 
 
 def test_candidate_enrichment_uses_one_combined_chain_lookup(
@@ -305,7 +422,7 @@ def test_candidate_enrichment_uses_one_combined_chain_lookup(
         "/v1/translator/blocks-found",
         params={
             "include_candidate_blocks": "true",
-            "candidate_window_seconds": 30,
+            "candidate_window_seconds": 90,
             "candidate_time_field": "mediantime",
         },
         headers={"Authorization": "Bearer testtoken"},
@@ -314,8 +431,8 @@ def test_candidate_enrichment_uses_one_combined_chain_lookup(
     assert response.status_code == 200
     assert len(calls) == 1
     assert calls[0]["owned_only"] is False
-    assert calls[0]["start_time"] == 970
-    assert calls[0]["end_time"] == 1130
+    assert calls[0]["start_time"] == 910
+    assert calls[0]["end_time"] == 1190
     assert calls[0]["time_field"] == "mediantime"
 
 

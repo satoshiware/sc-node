@@ -160,10 +160,20 @@ Use `/v1/az/blocks/rewards` for chain-side reward truth before any ledger
 accounting step.
 
 If `/v1/translator/blocks-found` is called with
-`include_candidate_blocks=true`, the returned `candidate_blocks` are only
-nearby time-window chain candidates. They are useful for operator review,
-but they are not verified payout proof and must not replace exact
-translator/pool evidence in `blockhash`.
+`include_candidate_blocks=true`, use the default
+`candidate_window_seconds=90` for payout-safe strict correlation. Wider
+windows such as 180 or 300 seconds are diagnostic/manual-review only
+because they may return multiple candidate blocks for one event.
+
+Ledger auto-crediting must ingest only rows where all of the following
+are true:
+
+- `blockhash_status == "resolved"`
+- `correlation_status == "resolved_to_blockhash"`
+- `candidate_count == 1`
+- `blockhash != null`
+- `candidate_coinbase_total_sats != null`
+- `payout_ready == true`
 
 ## Explicit Non-Goal Warning
 
