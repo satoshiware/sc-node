@@ -133,3 +133,19 @@ Roll back and stop:
 alembic -c alembic.ini downgrade base
 docker compose -f docker-compose.postgres.yml down
 ```
+
+## Historical Postgres Shadow Backfill
+
+Dry-run one historical settlement into the Postgres shadow ledger:
+
+```bash
+POSTGRES_LEDGER_DATABASE_URL=postgresql+psycopg://azledger:azledger_dev_password@localhost:5432/azcoin_ledger_dev \
+python scripts/backfill_postgres_shadow.py --settlement-id 49
+```
+
+Write a bounded range only when you explicitly want inserts/upserts:
+
+```bash
+POSTGRES_LEDGER_DATABASE_URL=postgresql+psycopg://azledger:azledger_dev_password@localhost:5432/azcoin_ledger_dev \
+python scripts/backfill_postgres_shadow.py --start-id 40 --end-id 49 --write
+```

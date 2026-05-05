@@ -10,6 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.config import load_settings
+from app.delta import IdentityDelta, UserContribution, compute_identity_share_deltas, compute_user_contribution_deltas
 from app.models import Settlement, SnapshotBlock, User, UserPayout
 from app.postgres_db import make_postgres_engine, make_postgres_session_factory
 from app.postgres_repositories import PostgresLedgerRepository
@@ -33,18 +34,44 @@ class _SQLiteSettlementContext:
     block_rows: list[SnapshotBlock]
 
 
+@dataclass(frozen=True)
+class SQLiteSettlementContext(_SQLiteSettlementContext):
+    identity_deltas: dict[str, IdentityDelta]
+    user_contributions: dict[str, UserContribution]
+
+
 def _to_decimal_str(value: Decimal | int | str) -> str:
     return f"{Decimal(str(value)):.8f}"
+
+
+def to_decimal_str(value: Decimal | int | str) -> str:
+    return _to_decimal_str(value)
 
 
 def _normalize_work(value: Decimal | int | str) -> Decimal:
     return Decimal(str(value)).quantize(SQLITE_WORK_QUANTUM, rounding=ROUND_HALF_UP)
 
 
+def normalize_work(value: Decimal | int | str) -> Decimal:
+    return _normalize_work(value)
+
+
 def _btc_to_sats(value: Decimal | int | str) -> int:
     btc = Decimal(str(value))
     sats = (btc * SATS_PER_BTC).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
     return int(sats)
+
+
+def btc_to_sats(value: Decimal | int | str) -> int:
+    return _btc_to_sats(value)
+
+
+def as_utc_aware(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def get_postgres_shadow_compare_repository() -> PostgresLedgerRepository:
@@ -93,6 +120,46 @@ def _load_sqlite_settlement_context(session: Session, settlement_id: int) -> _SQ
         payout_rows=payout_rows,
         block_rows=block_rows,
     )
+
+
+def load_sqlite_settlement_context(session: Session, settlement_id: int) -> SQLiteSettlementContext | None:
+    context = _load_sqlite_settlement_context(session, settlement_id)
+    if context is None:
+        return None
+
+    identity_deltas = compute_identity_share_deltas(
+        session,
+        context.work_window_start,
+        context.work_window_end,
+    )
+    user_contributions = compute_user_contribution_deltas(
+        session,
+        context.work_window_start,
+        context.work_window_end,
+    )
+    return SQLiteSettlementContext(
+        settlement=context.settlement,
+        work_window_start=context.work_window_start,
+        work_window_end=context.work_window_end,
+        payout_rows=context.payout_rows,
+        block_rows=context.block_rows,
+        identity_deltas=identity_deltas,
+        user_contributions=user_contributions,
+    )
+
+
+def uses_work_basis_for_shadow_write(context: SQLiteSettlementContext) -> bool:
+    if any(item.work_delta > 0 for item in context.user_contributions.values()):
+        return True
+
+    for payout, user in context.payout_rows:
+        contribution_value = Decimal(str(payout.contribution_value or 0))
+        contribution = context.user_contributions.get(user.username)
+        share_delta = Decimal(str((contribution or UserContribution(user.username, 0, Decimal("0"))).share_delta))
+        if contribution_value != share_delta:
+            return True
+
+    return False
 
 
 def _sqlite_summary(context: _SQLiteSettlementContext) -> dict[str, object]:
