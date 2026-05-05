@@ -53,7 +53,7 @@ Copy `.env.example` to `.env`.
 - **AZCOIN_CORE_IMAGE**: core docker image used by compose (default: `ghcr.io/satoshiware/azcoin-node:latest`)
 - **BTC_RPC_PORT**: Bitcoin RPC port used by docker compose (default: `8332`)
 - **BITCOIN_CORE_IMAGE**: bitcoin core docker image used by compose (default: `bitcoin/bitcoin-core:28.0`)
-- **TRANSLATOR_LOG_PATH**: optional path to the translator process log file for observability endpoints (unset disables translator log reads)
+- **TRANSLATOR_LOG_PATH**: optional path to the translator process log file for observability and block-reward proof endpoints. `GET /v1/translator/block-reward-events` prefers this file when set; when unset, it attempts `journalctl -u aztranslator.service`.
 - **TRANSLATOR_LOG_DEFAULT_LINES**: default line count for `GET /v1/translator/logs/tail` when `lines` is omitted (default: `200`)
 - **TRANSLATOR_LOG_MAX_LINES**: maximum lines read from the log tail per request and upper bound for the `lines` query param (default: `1000`)
 - **TRANSLATOR_MONITORING_BASE_URL**: optional base URL of the translator's built-in monitoring HTTP server (for example `http://127.0.0.1:5000`). When unset, monitoring-backed routes return a stable `unconfigured` envelope instead of calling upstream.
@@ -162,7 +162,8 @@ Notes:
 - **GET** `/v1/translator/status` (protected; merged health: log file panel plus optional live monitoring probe; overall `status` is `ok`, `degraded`, or `unconfigured`)
 - **GET** `/v1/translator/summary` (protected; log-backed status plus level/category counts over the log tail; query: `lines` default `500`, max `2000`)
 - **GET** `/v1/translator/miner-work/snapshot` (protected; ledger-ready normalized join of `/upstream/channels` and `/downstreams` keyed by `channel_id`; ledger-sensitive numerics like `share_work_sum` / `best_diff` / `hashrate` are returned as strings; fail-closed when either side is unreachable; see [`docs/api/ledger-mvp-endpoints.md`](docs/api/ledger-mvp-endpoints.md) section 5)
-- **GET** `/v1/translator/blocks-found` (protected; durable API-side translator `blocks_found` counter-delta evidence persisted by the poller; newest-first history over `detected_time`; candidate correlation defaults to a payout-safe 90-second window when `include_candidate_blocks=true`; wider windows such as 180 or 300 seconds are diagnostic/manual-review only because they may produce multiple candidate blocks; `channel_id` is metadata only and not payout identity)
+- **GET** `/v1/translator/block-reward-events` (protected; production block reward events parsed from out-of-box aztranslator/JD-client `Block Found` log or journal lines containing the submitted 64-hex share hash; verifies direct and byte-reversed hash forms against chain reward truth; `payout_ready=true` only for matched, main-chain, mature rewards with a coinbase total)
+- **GET** `/v1/translator/blocks-found` (protected; durable API-side translator `blocks_found` counter-delta evidence persisted by the poller; newest-first history over `detected_time`; candidate correlation is diagnostic/manual-review only when `include_candidate_blocks=true`; wider windows such as 180 or 300 seconds may produce multiple candidate blocks; `channel_id` is metadata only and not payout identity)
 - **GET** `/v1/translator/logs/tail` (protected; newest-first normalized records from the translator log tail; query: `lines`, optional `level`, `contains`)
 - **GET** `/v1/translator/events/recent` (protected; newest-first normalized records; query: `limit`, optional `category`, `level`, `contains`)
 - **GET** `/v1/translator/errors/recent` (protected; newest-first `WARN`/`ERROR` records; query: `limit`)

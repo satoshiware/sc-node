@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from node_api.services import translator_blocks_found_candidates as tbfc
 from node_api.services import translator_blocks_found_store as tbfs
+from node_api.services import translator_block_reward_events as tbre
 from node_api.services import translator_logs as tl
 from node_api.services import translator_miner_work as tmw
 from node_api.services import translator_monitoring as tm
@@ -234,6 +235,38 @@ class TranslatorBlocksFoundCandidatesResponse(BaseModel):
     items: list[TranslatorBlocksFoundCandidateEventItem]
 
 
+class TranslatorBlockRewardEventItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    found_time: int
+    found_time_iso: str
+    proof_type: Literal["translator_block_found_share_hash"]
+    raw_share_hash: str
+    matched_blockhash: str | None = None
+    hash_match_method: Literal["direct", "byte_reversed"] | None = None
+    chain_status: Literal["matched", "not_found", "not_main_chain", "immature"]
+    coinbase_total_sats: int | None = None
+    confirmations: int | None = None
+    maturity_status: str | None = None
+    is_on_main_chain: bool
+    payout_ready: bool
+    source: Literal["aztranslator_journal", "translator_log"]
+    raw_log_line: str | None = None
+
+
+class TranslatorBlockRewardEventsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"]
+    source: Literal["aztranslator_journal", "translator_log"]
+    total: int
+    matched_count: int
+    payout_ready_count: int
+    not_found_count: int
+    immature_count: int
+    items: list[TranslatorBlockRewardEventItem]
+
+
 def _clamp_lines(lines: int, settings: Settings) -> int:
     return max(1, min(lines, settings.translator_log_max_lines))
 
@@ -432,6 +465,24 @@ def translator_blocks_found(
             },
             "items": items,
         }
+    ).model_dump()
+
+
+@router.get("/block-reward-events", response_model=TranslatorBlockRewardEventsResponse)
+def translator_block_reward_events(
+    settings: Settings = Depends(get_settings),
+    limit: int = Query(default=100, ge=1, le=1000),
+) -> dict[str, Any]:
+    """Production block reward events from translator Block Found share-hash proof.
+
+    This endpoint parses the out-of-box translator/JD-client log or journal
+    lines that include ``Block Found`` and the submitted share hash, then
+    verifies that hash against chain reward truth. Timestamp correlation from
+    ``/translator/blocks-found?include_candidate_blocks=true`` remains
+    diagnostic only and must not drive payout readiness.
+    """
+    return TranslatorBlockRewardEventsResponse.model_validate(
+        tbre.block_reward_events_payload(settings, limit=limit)
     ).model_dump()
 
 

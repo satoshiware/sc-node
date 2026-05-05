@@ -73,7 +73,10 @@ def _candidate_blocks_for_event(
             enriched["blockhash_status"] = "resolved"
             enriched["correlation_status"] = "resolved_to_blockhash"
         enriched["candidate_coinbase_total_sats"] = candidate.get("coinbase_total_sats")
-        enriched["payout_ready"] = _is_payout_ready(candidate)
+        # Timestamp correlation is diagnostic only. Production payout readiness
+        # must come from translator block-found share-hash proof plus direct
+        # chain reward verification.
+        enriched["payout_ready"] = False
     elif len(matches) > 1:
         enriched["blockhash"] = None
         enriched["blockhash_status"] = "ambiguous"

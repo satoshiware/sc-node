@@ -209,7 +209,7 @@ def test_exactly_one_candidate_returns_resolved_blockhash_but_not_payout_ready_w
     assert item["candidate_blocks"][0]["blockhash"] == "a" * 64
 
 
-def test_exactly_one_candidate_returns_payout_ready_only_when_mature_main_chain_and_reward_present(
+def test_exactly_one_candidate_is_diagnostic_even_when_mature_main_chain_and_reward_present(
     monkeypatch, tmp_path: Path
 ) -> None:
     client = _client(monkeypatch, tmp_path)
@@ -245,7 +245,7 @@ def test_exactly_one_candidate_returns_payout_ready_only_when_mature_main_chain_
     assert item["blockhash_status"] == "resolved"
     assert item["correlation_status"] == "resolved_to_blockhash"
     assert item["candidate_coinbase_total_sats"] == 625_000_000
-    assert item["payout_ready"] is True
+    assert item["payout_ready"] is False
     assert item["candidate_count"] == 1
 
 
