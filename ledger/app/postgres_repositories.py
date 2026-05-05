@@ -72,6 +72,11 @@ class PostgresLedgerRepository:
             row = session.execute(statement).first()
             return None if row is None else _row_to_dict(row)
 
+    def _select_all(self, statement: Select) -> list[dict[str, Any]]:
+        with self.session_factory() as session:
+            rows = session.execute(statement).all()
+            return [_row_to_dict(row) for row in rows]
+
     def upsert_user(
         self,
         username: str,
@@ -514,6 +519,50 @@ class PostgresLedgerRepository:
                 settlement_user_credits.c.settlement_id == settlement_id,
                 settlement_user_credits.c.user_id == user_id,
             )
+        )
+
+    def list_settlement_user_credits_with_users(self, settlement_id: int) -> list[dict[str, Any]]:
+        return self._select_all(
+            select(
+                settlement_user_credits.c.id,
+                settlement_user_credits.c.settlement_id,
+                settlement_user_credits.c.user_id,
+                settlement_user_credits.c.amount_sats,
+                settlement_user_credits.c.idempotency_key,
+                settlement_user_credits.c.status,
+                settlement_user_credits.c.created_at,
+                users.c.username,
+            )
+            .select_from(
+                settlement_user_credits.join(
+                    users,
+                    users.c.id == settlement_user_credits.c.user_id,
+                )
+            )
+            .where(settlement_user_credits.c.settlement_id == settlement_id)
+            .order_by(users.c.username.asc(), settlement_user_credits.c.id.asc())
+        )
+
+    def list_settlement_blocks(self, settlement_id: int) -> list[dict[str, Any]]:
+        return self._select_all(
+            select(
+                settlement_blocks.c.id,
+                settlement_blocks.c.settlement_id,
+                settlement_blocks.c.blockhash,
+                settlement_blocks.c.reward_sats,
+                blocks_found.c.found_at,
+                blocks_found.c.channel_id,
+                blocks_found.c.worker_identity,
+                blocks_found.c.source,
+            )
+            .select_from(
+                settlement_blocks.join(
+                    blocks_found,
+                    blocks_found.c.blockhash == settlement_blocks.c.blockhash,
+                )
+            )
+            .where(settlement_blocks.c.settlement_id == settlement_id)
+            .order_by(blocks_found.c.found_at.asc(), settlement_blocks.c.id.asc())
         )
 
     def create_account_ledger_entry(
