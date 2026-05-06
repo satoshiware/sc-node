@@ -3,10 +3,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Mapping
 
-from sqlalchemy import Select, select
+from sqlalchemy import (
+    TEXT,
+    BigInteger,
+    CheckConstraint,
+    Column,
+    Index,
+    Integer,
+    Select,
+    Table,
+    UniqueConstraint,
+    select,
+    text,
+)
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.orm import sessionmaker
 
 from app.postgres_schema import (
@@ -25,6 +38,46 @@ from app.postgres_schema import (
     settlement_user_work,
     settlement_windows,
     users,
+)
+
+
+translator_candidate_blocks = Table(
+    "translator_candidate_blocks",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("found_time", TIMESTAMP(timezone=True), nullable=False),
+    Column("found_time_unix", BigInteger, nullable=False),
+    Column("blockhash", TEXT, nullable=False),
+    Column("worker_identity", TEXT),
+    Column("channel_id", Integer),
+    Column("job_id", TEXT),
+    Column("extranonce2", TEXT),
+    Column("ntime", TEXT),
+    Column("nonce", TEXT),
+    Column("version", TEXT),
+    Column("prev_hash", TEXT),
+    Column("nbits", TEXT),
+    Column("source", TEXT, nullable=False, server_default=text("'sv1_capture_proxy'")),
+    Column(
+        "proof_type",
+        TEXT,
+        nullable=False,
+        server_default=text("'translator_submit_reconstructed_block_hash'"),
+    ),
+    Column("raw_submit_json", JSONB),
+    Column("raw_job_json", JSONB),
+    Column("created_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")),
+    CheckConstraint(
+        "blockhash ~ '^[0-9a-f]{64}$'",
+        name="ck_translator_candidate_blocks_blockhash_lower_hex",
+    ),
+    UniqueConstraint("blockhash", name="uq_translator_candidate_blocks_blockhash"),
+)
+Index("ix_translator_candidate_blocks_found_time", translator_candidate_blocks.c.found_time)
+Index(
+    "ix_translator_candidate_blocks_worker_identity_found_time",
+    translator_candidate_blocks.c.worker_identity,
+    translator_candidate_blocks.c.found_time,
 )
 
 
@@ -52,6 +105,49 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
 
 def _clean_values(values: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in values.items() if value is not None}
+
+
+def _event_field(event: Mapping[str, Any] | Any, name: str) -> Any:
+    if isinstance(event, Mapping):
+        return event.get(name)
+    return getattr(event, name, None)
+
+
+def _translator_candidate_block_values(event: Mapping[str, Any] | Any) -> dict[str, Any]:
+    found_time = _event_field(event, "found_time")
+    _require_tzaware("found_time", found_time)
+    created_at = _event_field(event, "created_at")
+    _require_tzaware("created_at", created_at)
+
+    blockhash = _event_field(event, "blockhash")
+    if blockhash is None:
+        raise ValueError("blockhash is required")
+
+    found_time_unix = _event_field(event, "found_time_unix")
+    if found_time_unix is None:
+        found_time_unix = int(found_time.timestamp())
+
+    return _clean_values(
+        {
+            "found_time": found_time,
+            "found_time_unix": int(found_time_unix),
+            "blockhash": str(blockhash).lower(),
+            "worker_identity": _event_field(event, "worker_identity"),
+            "channel_id": _event_field(event, "channel_id"),
+            "job_id": _event_field(event, "job_id"),
+            "extranonce2": _event_field(event, "extranonce2"),
+            "ntime": _event_field(event, "ntime"),
+            "nonce": _event_field(event, "nonce"),
+            "version": _event_field(event, "version"),
+            "prev_hash": _event_field(event, "prev_hash"),
+            "nbits": _event_field(event, "nbits"),
+            "source": _event_field(event, "source"),
+            "proof_type": _event_field(event, "proof_type"),
+            "raw_submit_json": _event_field(event, "raw_submit_json"),
+            "raw_job_json": _event_field(event, "raw_job_json"),
+            "created_at": created_at,
+        }
+    )
 
 
 @dataclass
@@ -265,6 +361,62 @@ class PostgresLedgerRepository:
 
     def get_block_found(self, blockhash: str) -> dict[str, Any] | None:
         return self._select_one_or_none(select(blocks_found).where(blocks_found.c.blockhash == blockhash))
+
+    def insert_translator_candidate_block(self, event: Mapping[str, Any] | Any) -> dict[str, Any]:
+        values = _translator_candidate_block_values(event)
+        statement = (
+            pg_insert(translator_candidate_blocks)
+            .values(**values)
+            .on_conflict_do_nothing(index_elements=[translator_candidate_blocks.c.blockhash])
+            .returning(*translator_candidate_blocks.c)
+        )
+        row = self._select_returned_or_none(statement)
+        if row is not None:
+            return row
+        existing = self.get_translator_candidate_block_by_hash(values["blockhash"])
+        if existing is None:
+            raise RuntimeError("translator candidate block insert conflicted but no existing row was found")
+        return existing
+
+    def list_translator_candidate_blocks(
+        self,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        limit: int = 100,
+        order: str = "desc",
+    ) -> list[dict[str, Any]]:
+        _require_tzaware("start_time", start_time)
+        _require_tzaware("end_time", end_time)
+        if limit < 1:
+            raise ValueError("limit must be positive")
+
+        normalized_order = order.lower()
+        if normalized_order == "asc":
+            order_by = (
+                translator_candidate_blocks.c.found_time.asc(),
+                translator_candidate_blocks.c.id.asc(),
+            )
+        elif normalized_order == "desc":
+            order_by = (
+                translator_candidate_blocks.c.found_time.desc(),
+                translator_candidate_blocks.c.id.desc(),
+            )
+        else:
+            raise ValueError("order must be asc or desc")
+
+        statement = select(translator_candidate_blocks)
+        if start_time is not None:
+            statement = statement.where(translator_candidate_blocks.c.found_time >= start_time)
+        if end_time is not None:
+            statement = statement.where(translator_candidate_blocks.c.found_time < end_time)
+        return self._select_all(statement.order_by(*order_by).limit(limit))
+
+    def get_translator_candidate_block_by_hash(self, blockhash: str) -> dict[str, Any] | None:
+        return self._select_one_or_none(
+            select(translator_candidate_blocks).where(
+                translator_candidate_blocks.c.blockhash == blockhash.lower()
+            )
+        )
 
     def upsert_block_reward(
         self,
