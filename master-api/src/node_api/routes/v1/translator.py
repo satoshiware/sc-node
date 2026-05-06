@@ -7,8 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from node_api.services import translator_block_reward_events as tbre
-from node_api.services import translator_blocks_found_candidates as tbfc
-from node_api.services import translator_blocks_found_store as tbfs
+from node_api.services import translator_candidate_blocks_postgres as tcbp
 from node_api.services import translator_logs as tl
 from node_api.services import translator_miner_work as tmw
 from node_api.services import translator_monitoring as tm
@@ -18,7 +17,6 @@ router = APIRouter(prefix="/translator", tags=["translator"])
 
 _SUMMARY_DEFAULT_LINES = 500
 _SUMMARY_MAX_LINES = 2000
-_BLOCKS_FOUND_INTERVAL_RULE = "start_time <= detected_time < end_time"
 
 _CLIENT_ID_RE = re.compile(r"^[\w.-]{1,128}$")
 
@@ -161,78 +159,22 @@ class MinerWorkSnapshotResponse(BaseModel):
 class TranslatorBlocksFoundEventItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    detected_time: int
-    detected_time_iso: str
-    channel_id: int
-    worker_identity: str
-    authorized_worker_name: str | None = None
-    downstream_user_identity: str | None = None
-    upstream_user_identity: str | None = None
-    blocks_found_before: int
-    blocks_found_after: int
-    blocks_found_delta: int
-    share_work_sum_at_detection: str | None = None
-    shares_acknowledged_at_detection: int | None = None
-    shares_submitted_at_detection: int | None = None
-    shares_rejected_at_detection: int | None = None
-    blockhash: str | None = None
-    blockhash_status: str
-    correlation_status: str
-
-
-class TranslatorBlocksFoundCandidateBlock(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    height: int | None = None
-    blockhash: str | None = None
-    time: int | None = None
-    mediantime: int | None = None
-    selected_time: int
-    signed_delta_seconds: int
-    abs_delta_seconds: int
-    coinbase_total_sats: int | None = None
-    maturity_status: str | None = None
-    confirmations: int | None = None
-    is_on_main_chain: bool | None = None
-
-
-class TranslatorBlocksFoundCandidateEventItem(TranslatorBlocksFoundEventItem):
-    candidate_window_seconds: int
-    candidate_time_field: Literal["time", "mediantime"]
-    candidate_count: int
-    candidate_coinbase_total_sats: int | None = None
-    payout_ready: bool = False
-    nearest_candidate_blockhash: str | None = None
-    candidate_blocks: list[TranslatorBlocksFoundCandidateBlock]
-
-
-class TranslatorBlocksFoundTimeFilter(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    start_time: int | None = None
-    end_time: int | None = None
-    time_field: Literal["detected_time"]
-    interval_rule: str
+    found_time: int
+    found_time_iso: str
+    blockhash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    worker_identity: str | None = None
+    channel_id: int | None = None
+    source: str
+    proof_type: str
 
 
 class TranslatorBlocksFoundResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["ok"]
-    source: Literal["translator_blocks_found_events"]
+    source: Literal["ledger_postgres_translator_candidate_blocks"]
     total: int
-    time_filter: TranslatorBlocksFoundTimeFilter
     items: list[TranslatorBlocksFoundEventItem]
-
-
-class TranslatorBlocksFoundCandidatesResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"]
-    source: Literal["translator_blocks_found_events"]
-    total: int
-    time_filter: TranslatorBlocksFoundTimeFilter
-    items: list[TranslatorBlocksFoundCandidateEventItem]
 
 
 class TranslatorBlockRewardEventItem(BaseModel):
@@ -366,44 +308,15 @@ def translator_miner_work_snapshot(
     )
 
 
-@router.get(
-    "/blocks-found",
-    response_model=TranslatorBlocksFoundResponse | TranslatorBlocksFoundCandidatesResponse,
-)
+@router.get("/blocks-found", response_model=TranslatorBlocksFoundResponse)
 def translator_blocks_found(
     settings: Settings = Depends(get_settings),
     start_time: int | None = Query(default=None, ge=0),
     end_time: int | None = Query(default=None, ge=0),
     limit: int = Query(default=100, ge=1, le=1000),
-    worker_identity: str | None = Query(default=None),
-    channel_id: int | None = Query(default=None),
-    blockhash_status: str | None = Query(default=None),
-    include_candidate_blocks: bool = Query(default=False),
-    candidate_window_seconds: int = Query(
-        default=90,
-        ge=1,
-        le=3600,
-        description=(
-            "Default: 90. Intended payout-safe strict correlation window. "
-            "Larger values may return ambiguous results and should not be "
-            "used for automatic payout crediting."
-        ),
-    ),
-    candidate_time_field: Literal["time", "mediantime"] = Query(default="time"),
-    candidate_limit_per_event: int = Query(default=10, ge=1, le=50),
+    order: Literal["asc", "desc"] = Query(default="desc"),
 ) -> dict[str, Any]:
-    """Durable translator block-found counter-delta evidence.
-
-    This route exposes persisted counter-delta observations from the
-    translator poller. It is evidence that a translator-side
-    ``blocks_found`` counter increased for a worker identity; it does not
-    prove chain inclusion, reward maturity, payout eligibility, or wallet
-    movement. Ledger code must still verify rewards through
-    ``/v1/az/blocks/rewards``. When ``include_candidate_blocks=true``, the
-    payout-safe default correlation window is 90 seconds. Wider diagnostic
-    windows such as 180 or 300 seconds may return multiple nearby
-    candidates and must not be used for automatic payout crediting.
-    """
+    """Read-only view of ledger-ingested translator candidate block events."""
     if (
         start_time is not None
         and end_time is not None
@@ -411,51 +324,23 @@ def translator_blocks_found(
     ):
         _raise_blocks_found_time_range_invalid()
 
-    store = tbfs.TranslatorBlocksFoundStore.from_settings(settings)
-    total, items = store.list_events(
-        start_time=start_time,
-        end_time=end_time,
-        limit=limit,
-        worker_identity=worker_identity,
-        channel_id=channel_id,
-        blockhash_status=blockhash_status,
-    )
-    if include_candidate_blocks:
-        items = tbfc.enrich_events_with_candidate_blocks(
-            items,
-            candidate_window_seconds=candidate_window_seconds,
-            candidate_time_field=candidate_time_field,
-            candidate_limit_per_event=candidate_limit_per_event,
+    try:
+        payload = tcbp.blocks_found_payload(
+            settings,
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+            order=order,
         )
-        return TranslatorBlocksFoundCandidatesResponse.model_validate(
-            {
-                "status": "ok",
-                "source": "translator_blocks_found_events",
-                "total": total,
-                "time_filter": {
-                    "start_time": start_time,
-                    "end_time": end_time,
-                    "time_field": "detected_time",
-                    "interval_rule": _BLOCKS_FOUND_INTERVAL_RULE,
-                },
-                "items": items,
-            }
-        ).model_dump()
-
-    return TranslatorBlocksFoundResponse.model_validate(
-        {
-            "status": "ok",
-            "source": "translator_blocks_found_events",
-            "total": total,
-            "time_filter": {
-                "start_time": start_time,
-                "end_time": end_time,
-                "time_field": "detected_time",
-                "interval_rule": _BLOCKS_FOUND_INTERVAL_RULE,
+    except tcbp.LedgerPostgresUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "LEDGER_POSTGRES_UNAVAILABLE",
+                "message": "Ledger Postgres unavailable",
             },
-            "items": items,
-        }
-    ).model_dump()
+        ) from exc
+    return TranslatorBlocksFoundResponse.model_validate(payload).model_dump()
 
 
 @router.get("/block-reward-events", response_model=TranslatorBlockRewardEventsResponse)
