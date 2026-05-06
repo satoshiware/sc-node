@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any, Literal
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -41,6 +41,14 @@ class Settings(BaseSettings):
     translator_blocks_found_db_path: str = Field(
         default=".data/translator_blocks_found.sqlite3",
         validation_alias="TRANSLATOR_BLOCKS_FOUND_DB_PATH",
+    )
+    ledger_postgres_database_url: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "LEDGER_POSTGRES_DATABASE_URL",
+            "POSTGRES_LEDGER_DATABASE_URL",
+        ),
+        repr=False,
     )
 
     # Auth (stub)
@@ -105,6 +113,15 @@ class Settings(BaseSettings):
         if isinstance(value, str) and not value.strip():
             return ".data/translator_blocks_found.sqlite3"
         return str(value).strip() if isinstance(value, str) else str(value)
+
+    @field_validator("ledger_postgres_database_url", mode="before")
+    @classmethod
+    def _blank_ledger_postgres_database_url(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return str(value).strip() if isinstance(value, str) else value
 
     @model_validator(mode="before")
     @classmethod
