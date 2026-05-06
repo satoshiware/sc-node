@@ -12,35 +12,61 @@ from fastapi import HTTPException
 from node_api.services import translator_logs as tl
 from node_api.settings import Settings
 
-_BLOCK_FOUND_PHRASE = "block found"
-_HEX_64_RE = re.compile(r"\b[0-9a-fA-F]{64}\b")
 _ISO_TS_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
     r"(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?"
 )
-_EXCLUDED_PREV_HASH_MARKERS = ("setnewprevhash", "prev_hash")
-_CANDIDATE_BLOCK_MARKERS = (
-    _BLOCK_FOUND_PHRASE,
-    "candidate block",
-    "candidate_block",
-    "submitted block",
-    "submit block",
+_SUBMIT_RE = re.compile(
+    r"Received\s+mining\.submit\s+from\s+SV1\s+downstream\s+for\s+channel\s+id:\s*(\d+)",
+    re.IGNORECASE,
 )
+_SHARE_VALIDATION_RE = re.compile(
+    r"share\s+validation\s+share:\s*([0-9a-fA-F]{64})\s+downstream\s+target:\s*"
+    r"[0-9a-fA-F]{64}",
+    re.IGNORECASE,
+)
+_FORWARDED_RE = re.compile(
+    r"SubmitSharesExtended:\s*valid\s+share,\s*forwarding\s+it\s+to\s+upstream\s*\|\s*"
+    r"channel_id:\s*(\d+),\s*sequence_number:\s*(\d+)",
+    re.IGNORECASE,
+)
+_EXCLUDED_MARKERS = ("setnewprevhash", "prev_hash", "blocks_found")
 _JOURNALCTL_TIMEOUT_SECONDS = 3.0
 _AZTRANSLATOR_SERVICE = "aztranslator.service"
 
 
 class TranslatorBlockRewardEventsConfigError(RuntimeError):
-    """Translator block-found proof source is unavailable."""
+    """Translator share-candidate proof source is unavailable."""
 
 
 @dataclass(frozen=True)
 class TranslatorBlockFoundProof:
+    """Translator-computed share/header hash, not accepted-chain block status."""
+
     found_time: int
     found_time_iso: str
     blockhash: str
     source: Literal["aztranslator_journal", "translator_log"]
+    channel_id: int
+    sequence_number: int
+    raw_log_lines: list[str]
+
+
+@dataclass(frozen=True)
+class _PendingSubmit:
+    channel_id: int
+    ts: tuple[int, str] | None
+    line_index: int
     raw_log_line: str
+
+
+@dataclass(frozen=True)
+class _PendingValidation:
+    channel_id: int
+    submit_ts: tuple[int, str] | None
+    validation_ts: tuple[int, str] | None
+    share_header_hash: str
+    raw_log_lines: list[str]
 
 
 def _parse_timestamp(value: str) -> tuple[int, str] | None:
@@ -83,29 +109,20 @@ def parse_block_found_proof_line(
     *,
     source: Literal["aztranslator_journal", "translator_log"] = "translator_log",
 ) -> TranslatorBlockFoundProof | None:
-    line = raw_line.rstrip("\r\n")
-    lowered = line.lower()
-    if any(marker in lowered for marker in _EXCLUDED_PREV_HASH_MARKERS):
-        return None
-    if not any(marker in lowered for marker in _CANDIDATE_BLOCK_MARKERS):
-        return None
+    """Retained for compatibility; single log lines are no longer sufficient proof.
 
-    hashes = _HEX_64_RE.findall(line)
-    if len(hashes) != 1:
-        return None
+    The block-reward-events endpoint now requires ordered translator-only
+    evidence from mining.submit, share validation, and upstream forwarding
+    lines. The hash returned as ``blockhash`` is the translator-computed
+    share/candidate header hash, not accepted-chain status.
+    """
+    del raw_line, source
+    return None
 
-    parsed_ts = _extract_translator_timestamp(line)
-    if parsed_ts is None:
-        return None
 
-    found_time, found_time_iso = parsed_ts
-    return TranslatorBlockFoundProof(
-        found_time=found_time,
-        found_time_iso=found_time_iso,
-        blockhash=hashes[0].lower(),
-        source=source,
-        raw_log_line=line,
-    )
+def _line_is_excluded(raw_line: str) -> bool:
+    lowered = raw_line.lower()
+    return any(marker in lowered for marker in _EXCLUDED_MARKERS)
 
 
 def _read_journalctl_lines(max_lines: int) -> list[str]:
@@ -128,7 +145,7 @@ def _read_journalctl_lines(max_lines: int) -> list[str]:
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise TranslatorBlockRewardEventsConfigError(
-            "Translator block-found proof source is unavailable. Set "
+            "Translator share-candidate proof source is unavailable. Set "
             "TRANSLATOR_LOG_PATH to a readable translator log file or provide "
             "journalctl access for aztranslator.service."
         ) from exc
@@ -151,21 +168,116 @@ def _load_proof_lines(
     return _read_journalctl_lines(max_lines), "aztranslator_journal"
 
 
+def _within_time_filter(
+    found_time: int,
+    *,
+    start_time: int | None,
+    end_time: int | None,
+) -> bool:
+    if start_time is not None and found_time < start_time:
+        return False
+    if end_time is not None and found_time >= end_time:
+        return False
+    return True
+
+
+def parse_block_found_proofs_from_lines(
+    lines: list[str],
+    *,
+    source: Literal["aztranslator_journal", "translator_log"],
+    limit: int,
+    start_time: int | None = None,
+    end_time: int | None = None,
+) -> list[TranslatorBlockFoundProof]:
+    latest_submit: _PendingSubmit | None = None
+    pending_validation_by_channel: dict[int, _PendingValidation] = {}
+    proofs: list[TranslatorBlockFoundProof] = []
+
+    for line_index, raw_line in enumerate(lines):
+        line = raw_line.rstrip("\r\n")
+        if not line or _line_is_excluded(line):
+            continue
+
+        submit_match = _SUBMIT_RE.search(line)
+        if submit_match:
+            channel_id = int(submit_match.group(1))
+            latest_submit = _PendingSubmit(
+                channel_id=channel_id,
+                ts=_extract_translator_timestamp(line),
+                line_index=line_index,
+                raw_log_line=line,
+            )
+            continue
+
+        validation_match = _SHARE_VALIDATION_RE.search(line)
+        if validation_match:
+            if latest_submit is None:
+                continue
+            share_header_hash = validation_match.group(1).lower()
+            validation = _PendingValidation(
+                channel_id=latest_submit.channel_id,
+                submit_ts=latest_submit.ts,
+                validation_ts=_extract_translator_timestamp(line),
+                share_header_hash=share_header_hash,
+                raw_log_lines=[latest_submit.raw_log_line, line],
+            )
+            pending_validation_by_channel[latest_submit.channel_id] = validation
+            latest_submit = None
+            continue
+
+        forwarded_match = _FORWARDED_RE.search(line)
+        if not forwarded_match:
+            continue
+
+        channel_id = int(forwarded_match.group(1))
+        sequence_number = int(forwarded_match.group(2))
+        validation = pending_validation_by_channel.pop(channel_id, None)
+        if validation is None:
+            continue
+
+        found_ts = validation.validation_ts or validation.submit_ts
+        if found_ts is None:
+            continue
+        found_time, found_time_iso = found_ts
+        if not _within_time_filter(found_time, start_time=start_time, end_time=end_time):
+            continue
+
+        # ``blockhash`` is kept in the response for compatibility, but it is
+        # the translator-computed share/candidate header hash. It is not a
+        # statement that the hash was accepted on chain.
+        proofs.append(
+            TranslatorBlockFoundProof(
+                found_time=found_time,
+                found_time_iso=found_time_iso,
+                blockhash=validation.share_header_hash,
+                source=source,
+                channel_id=channel_id,
+                sequence_number=sequence_number,
+                raw_log_lines=[*validation.raw_log_lines, line],
+            )
+        )
+
+    return list(reversed(proofs))[:limit]
+
+
 def load_block_found_proofs_with_source(
-    settings: Settings, *, limit: int
+    settings: Settings,
+    *,
+    limit: int,
+    start_time: int | None = None,
+    end_time: int | None = None,
 ) -> tuple[list[TranslatorBlockFoundProof], Literal["aztranslator_journal", "translator_log"]]:
-    scan_lines = max(int(limit) * 20, settings.translator_log_default_lines)
+    scan_lines = max(int(limit) * 30, settings.translator_log_default_lines)
     scan_lines = max(1, min(scan_lines, settings.translator_log_max_lines))
     lines, source = _load_proof_lines(settings, scan_lines)
 
-    proofs: list[TranslatorBlockFoundProof] = []
-    for line in reversed(lines):
-        proof = parse_block_found_proof_line(line, source=source)
-        if proof is None:
-            continue
-        proofs.append(proof)
-        if len(proofs) >= limit:
-            break
+    proofs = parse_block_found_proofs_from_lines(
+        lines,
+        source=source,
+        limit=limit,
+        start_time=start_time,
+        end_time=end_time,
+    )
     return proofs, source
 
 
@@ -179,9 +291,11 @@ def _event_from_proof(proof: TranslatorBlockFoundProof) -> dict[str, Any]:
         "found_time": proof.found_time,
         "found_time_iso": proof.found_time_iso,
         "blockhash": proof.blockhash,
-        "proof_type": "translator_candidate_block_log",
+        "proof_type": "translator_validated_share_forwarded_upstream",
         "source": proof.source,
-        "raw_log_line": proof.raw_log_line,
+        "channel_id": proof.channel_id,
+        "sequence_number": proof.sequence_number,
+        "raw_log_lines": proof.raw_log_lines,
     }
 
 
@@ -193,9 +307,14 @@ def block_reward_events_payload(
     end_time: int | None = None,
     time_field: Literal["time", "mediantime"] = "time",
 ) -> dict[str, Any]:
-    del start_time, end_time, time_field
+    del time_field
     try:
-        proofs, proof_source = load_block_found_proofs_with_source(settings, limit=limit)
+        proofs, proof_source = load_block_found_proofs_with_source(
+            settings,
+            limit=limit,
+            start_time=start_time,
+            end_time=end_time,
+        )
     except TranslatorBlockRewardEventsConfigError as exc:
         raise HTTPException(
             status_code=503,

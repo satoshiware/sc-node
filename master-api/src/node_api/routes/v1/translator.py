@@ -241,9 +241,11 @@ class TranslatorBlockRewardEventItem(BaseModel):
     found_time: int
     found_time_iso: str
     blockhash: str
-    proof_type: Literal["translator_candidate_block_log"]
+    proof_type: Literal["translator_validated_share_forwarded_upstream"]
     source: Literal["aztranslator_journal", "translator_log"]
-    raw_log_line: str | None = None
+    channel_id: int
+    sequence_number: int
+    raw_log_lines: list[str]
 
 
 class TranslatorBlockRewardEventsResponse(BaseModel):
@@ -464,16 +466,14 @@ def translator_block_reward_events(
         default=None,
         ge=0,
         description=(
-            "Accepted for backward compatibility; ignored. This endpoint only "
-            "reads translator block-found proof lines."
+            "Filters translator log/journal events by found_time, inclusive."
         ),
     ),
     end_time: int | None = Query(
         default=None,
         ge=0,
         description=(
-            "Accepted for backward compatibility; ignored. This endpoint only "
-            "reads translator block-found proof lines."
+            "Filters translator log/journal events by found_time, exclusive."
         ),
     ),
     time_field: Literal["time", "mediantime"] = Query(
@@ -481,12 +481,14 @@ def translator_block_reward_events(
         description="Accepted for backward compatibility; ignored.",
     ),
 ) -> dict[str, Any]:
-    """Translator block-found proof lines only.
+    """Translator share-candidate proof lines only.
 
-    This endpoint parses translator/JD-client log or journal lines that
-    explicitly indicate a candidate/block-found submission and contain one
-    64-hex block hash. It does not perform payout readiness, reward ownership
-    matching, coinbase verification, maturity checks, or chain reward fallback.
+    This endpoint correlates translator/JD-client log or journal lines for
+    mining.submit, share validation, and valid upstream forwarding. The
+    response ``blockhash`` is the translator-computed share/candidate header
+    hash, not proof of accepted-chain status. It does not perform payout
+    readiness, reward ownership matching, coinbase verification, maturity
+    checks, confirmations, accepted/rejected status, or chain reward fallback.
     """
     return TranslatorBlockRewardEventsResponse.model_validate(
         tbre.block_reward_events_payload(

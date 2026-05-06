@@ -6,11 +6,14 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from node_api.services.translator_block_reward_events import (
-    parse_block_found_proof_line,
+    parse_block_found_proofs_from_lines,
 )
 from node_api.settings import get_settings
 
 AUTH = {"Authorization": "Bearer testtoken"}
+SHARE_HASH = "a" * 64
+TARGET_HASH = "f" * 64
+PREV_HASH = "b" * 64
 
 
 def _client(
@@ -39,92 +42,120 @@ def _client(
     return TestClient(main_module.create_app())
 
 
-def _proof_line(raw_hash: str) -> str:
-    return (
-        "2026-05-05T22:09:12.000000Z INFO jd_client::downstream: "
-        "SubmitSharesStandard on downstream channel: "
-        f"\U0001f4b0 Block Found!!! \U0001f4b0{raw_hash}"
+def _correlated_log(
+    *,
+    channel_id: int = 2,
+    sequence_number: int = 133723,
+    share_hash: str = SHARE_HASH,
+    submit_ts: str = "2026-05-05T22:09:11.000000Z",
+    validation_ts: str = "2026-05-05T22:09:12.000000Z",
+    forward_ts: str = "2026-05-05T22:09:13.000000Z",
+) -> str:
+    return "\n".join(
+        [
+            (
+                f"{submit_ts} DEBUG jd_client::downstream: "
+                "Received mining.submit from SV1 downstream for channel id: "
+                f"{channel_id}"
+            ),
+            (
+                f"{validation_ts} DEBUG jd_client::downstream: "
+                f"share validation share: {share_hash} downstream target: {TARGET_HASH}"
+            ),
+            (
+                f"{forward_ts} INFO jd_client::downstream: "
+                "SubmitSharesExtended: valid share, forwarding it to upstream | "
+                f"channel_id: {channel_id}, sequence_number: {sequence_number}"
+            ),
+        ]
     )
 
 
-def test_parser_extracts_timestamp_and_hash_from_translator_block_found_line() -> None:
-    raw_hash = "a" * 64
+def test_parser_correlates_submit_share_validation_and_forwarded_upstream() -> None:
+    proofs = parse_block_found_proofs_from_lines(
+        _correlated_log().splitlines(),
+        source="translator_log",
+        limit=10,
+    )
 
-    proof = parse_block_found_proof_line(_proof_line(raw_hash))
-
-    assert proof is not None
+    assert len(proofs) == 1
+    proof = proofs[0]
     assert proof.found_time == 1_778_018_952
     assert proof.found_time_iso == "2026-05-05T22:09:12Z"
-    assert proof.blockhash == raw_hash
+    assert proof.blockhash == SHARE_HASH
     assert proof.source == "translator_log"
+    assert proof.channel_id == 2
+    assert proof.sequence_number == 133723
+    assert len(proof.raw_log_lines) == 3
 
 
-def test_parser_prefers_inner_iso_timestamp_from_journal_line() -> None:
-    raw_hash = "b" * 64
-    line = (
-        "2026-05-05T22:10:00+00:00 host aztranslator[123]: "
-        f"{_proof_line(raw_hash)}"
+def test_endpoint_uses_share_validation_hash_as_blockhash(monkeypatch) -> None:
+    client = _client(
+        monkeypatch,
+        _correlated_log(share_hash="c" * 64),
+        log_name=".codex_tbre_share_hash.log",
     )
 
-    proof = parse_block_found_proof_line(line, source="aztranslator_journal")
+    response = client.get("/v1/translator/block-reward-events", headers=AUTH)
 
-    assert proof is not None
-    assert proof.found_time_iso == "2026-05-05T22:09:12Z"
-    assert proof.blockhash == raw_hash
-    assert proof.source == "aztranslator_journal"
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["blockhash"] == "c" * 64
+    assert item["proof_type"] == "translator_validated_share_forwarded_upstream"
+    assert item["channel_id"] == 2
+    assert item["sequence_number"] == 133723
+    assert len(item["raw_log_lines"]) == 3
 
 
-def test_parser_extracts_explicit_candidate_block_line() -> None:
-    blockhash = "f" * 64
-    line = (
-        "2026-05-05T22:09:12.000000Z INFO jd_client::upstream: "
-        f"submitted candidate block blockhash={blockhash}"
+def test_endpoint_ignores_set_new_prev_hash_prev_hash(monkeypatch) -> None:
+    log_text = "\n".join(
+        [
+            (
+                "2026-05-05T22:09:10.000000Z INFO jd_client::upstream: "
+                f"SetNewPrevHash prev_hash: {PREV_HASH}"
+            ),
+            _correlated_log(share_hash=SHARE_HASH),
+        ]
     )
+    client = _client(monkeypatch, log_text, log_name=".codex_tbre_prev_hash.log")
 
-    proof = parse_block_found_proof_line(line)
+    response = client.get("/v1/translator/block-reward-events", headers=AUTH)
 
-    assert proof is not None
-    assert proof.found_time_iso == "2026-05-05T22:09:12Z"
-    assert proof.blockhash == blockhash
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert body["items"][0]["blockhash"] == SHARE_HASH
+    assert body["items"][0]["blockhash"] != PREV_HASH
 
 
-def test_parser_ignores_set_new_prev_hash_prev_hash() -> None:
-    prev_hash = "e" * 64
-    line = (
-        "2026-05-05T22:09:12.000000Z INFO jd_client::upstream: "
-        f"SetNewPrevHash prev_hash: {prev_hash}"
+def test_endpoint_ignores_blocks_found_counters(monkeypatch) -> None:
+    log_text = "\n".join(
+        [
+            (
+                "2026-05-05T22:09:10.000000Z INFO translator: "
+                "blocks_found counter increased from 1 to 2"
+            ),
+            _correlated_log(share_hash=SHARE_HASH),
+        ]
     )
+    client = _client(monkeypatch, log_text, log_name=".codex_tbre_blocks_found.log")
 
-    assert parse_block_found_proof_line(line) is None
+    response = client.get("/v1/translator/block-reward-events", headers=AUTH)
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 1
+    assert response.json()["items"][0]["blockhash"] == SHARE_HASH
 
 
-def test_parser_ignores_valid_share_forwarding_line_without_blockhash() -> None:
-    line = (
-        "2026-05-05T22:09:12.000000Z INFO jd_client::downstream: "
+def test_endpoint_ignores_forwarding_only_lines_without_share_validation_hash(
+    monkeypatch,
+) -> None:
+    log_text = (
+        "2026-05-05T22:09:13.000000Z INFO jd_client::downstream: "
         "SubmitSharesExtended: valid share, forwarding it to upstream | "
         "channel_id: 2, sequence_number: 133723"
     )
-
-    assert parse_block_found_proof_line(line) is None
-
-
-def test_parser_ignores_blocks_found_counter_line() -> None:
-    line = (
-        "2026-05-05T22:09:12.000000Z INFO translator: "
-        "blocks_found counter increased from 1 to 2"
-    )
-
-    assert parse_block_found_proof_line(line) is None
-
-
-def test_endpoint_returns_total_zero_when_no_block_found_lines_exist(
-    monkeypatch,
-) -> None:
-    client = _client(
-        monkeypatch,
-        "2026-05-05T22:09:12Z INFO no block here",
-        log_name=".codex_tbre_empty.log",
-    )
+    client = _client(monkeypatch, log_text, log_name=".codex_tbre_forward_only.log")
 
     response = client.get("/v1/translator/block-reward-events", headers=AUTH)
 
@@ -137,85 +168,10 @@ def test_endpoint_returns_total_zero_when_no_block_found_lines_exist(
     }
 
 
-def test_endpoint_does_not_require_reward_ownership_config(
+def test_endpoint_response_does_not_include_payout_reward_or_ownership_fields(
     monkeypatch,
 ) -> None:
-    client = _client(monkeypatch, "", log_name=".codex_tbre_no_ownership.log")
-
-    response = client.get("/v1/translator/block-reward-events", headers=AUTH)
-
-    assert response.status_code == 200
-    assert response.json()["status"] == "ok"
-    assert response.json()["total"] == 0
-
-
-def test_endpoint_ignores_prev_hash_and_hashless_forwarding_lines(
-    monkeypatch,
-) -> None:
-    blockhash = "1" * 64
-    prev_hash = "2" * 64
-    log_text = "\n".join(
-        [
-            (
-                "2026-05-05T22:09:10.000000Z INFO jd_client::upstream: "
-                f"SetNewPrevHash prev_hash: {prev_hash}"
-            ),
-            (
-                "2026-05-05T22:09:11.000000Z INFO jd_client::downstream: "
-                "SubmitSharesExtended: valid share, forwarding it to upstream | "
-                "channel_id: 2, sequence_number: 133723"
-            ),
-            (
-                "2026-05-05T22:09:12.000000Z INFO jd_client::upstream: "
-                f"submitted candidate block blockhash={blockhash}"
-            ),
-        ]
-    )
-    client = _client(monkeypatch, log_text, log_name=".codex_tbre_mixed.log")
-
-    response = client.get("/v1/translator/block-reward-events", headers=AUTH)
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["total"] == 1
-    assert body["items"][0]["blockhash"] == blockhash
-
-
-def test_endpoint_does_not_call_chain_rewards_lookup(
-    monkeypatch,
-) -> None:
-    raw_hash = "c" * 64
-    client = _client(
-        monkeypatch,
-        _proof_line(raw_hash),
-        log_name=".codex_tbre_chain_guard.log",
-    )
-
-    def _unexpected_chain_rewards(**kwargs):
-        raise AssertionError("block-reward-events must not call chain rewards lookup")
-
-    monkeypatch.setattr(
-        "node_api.routes.v1.az_blocks.block_rewards",
-        _unexpected_chain_rewards,
-    )
-
-    response = client.get("/v1/translator/block-reward-events", headers=AUTH)
-
-    assert response.status_code == 200
-    item = response.json()["items"][0]
-    assert item["blockhash"] == raw_hash
-    assert item["proof_type"] == "translator_candidate_block_log"
-
-
-def test_endpoint_response_does_not_include_payout_fields(
-    monkeypatch,
-) -> None:
-    raw_hash = "d" * 64
-    client = _client(
-        monkeypatch,
-        _proof_line(raw_hash),
-        log_name=".codex_tbre_shape.log",
-    )
+    client = _client(monkeypatch, _correlated_log(), log_name=".codex_tbre_shape.log")
 
     response = client.get("/v1/translator/block-reward-events", headers=AUTH)
 
@@ -236,6 +192,10 @@ def test_endpoint_response_does_not_include_payout_fields(
         "confirmations",
         "maturity_status",
         "is_on_main_chain",
+        "ownership",
+        "accepted",
+        "rejected",
+        "reward",
         "blocked_reason",
         "matched_blockhash",
         "hash_match_method",
@@ -251,5 +211,95 @@ def test_endpoint_response_does_not_include_payout_fields(
         "blockhash",
         "proof_type",
         "source",
-        "raw_log_line",
+        "channel_id",
+        "sequence_number",
+        "raw_log_lines",
     }
+
+
+def test_endpoint_respects_start_time_and_end_time(monkeypatch) -> None:
+    log_text = "\n".join(
+        [
+            _correlated_log(
+                channel_id=2,
+                sequence_number=100,
+                share_hash="1" * 64,
+                submit_ts="2026-05-05T22:09:09.000000Z",
+                validation_ts="2026-05-05T22:09:10.000000Z",
+                forward_ts="2026-05-05T22:09:11.000000Z",
+            ),
+            _correlated_log(
+                channel_id=3,
+                sequence_number=101,
+                share_hash="2" * 64,
+                submit_ts="2026-05-05T22:09:11.000000Z",
+                validation_ts="2026-05-05T22:09:12.000000Z",
+                forward_ts="2026-05-05T22:09:13.000000Z",
+            ),
+            _correlated_log(
+                channel_id=4,
+                sequence_number=102,
+                share_hash="3" * 64,
+                submit_ts="2026-05-05T22:09:13.000000Z",
+                validation_ts="2026-05-05T22:09:14.000000Z",
+                forward_ts="2026-05-05T22:09:15.000000Z",
+            ),
+        ]
+    )
+    client = _client(monkeypatch, log_text, log_name=".codex_tbre_time_filter.log")
+
+    response = client.get(
+        "/v1/translator/block-reward-events?start_time=1778018952&end_time=1778018954",
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert body["items"][0]["blockhash"] == "2" * 64
+    assert body["items"][0]["found_time"] == 1_778_018_952
+
+
+def test_endpoint_returns_total_zero_when_debug_share_validation_lines_are_absent(
+    monkeypatch,
+) -> None:
+    log_text = "\n".join(
+        [
+            (
+                "2026-05-05T22:09:11.000000Z DEBUG jd_client::downstream: "
+                "Received mining.submit from SV1 downstream for channel id: 2"
+            ),
+            (
+                "2026-05-05T22:09:13.000000Z INFO jd_client::downstream: "
+                "SubmitSharesExtended: valid share, forwarding it to upstream | "
+                "channel_id: 2, sequence_number: 133723"
+            ),
+        ]
+    )
+    client = _client(monkeypatch, log_text, log_name=".codex_tbre_no_validation.log")
+
+    response = client.get("/v1/translator/block-reward-events", headers=AUTH)
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 0
+
+
+def test_endpoint_does_not_call_chain_rewards_lookup(monkeypatch) -> None:
+    client = _client(
+        monkeypatch,
+        _correlated_log(),
+        log_name=".codex_tbre_chain_guard.log",
+    )
+
+    def _unexpected_chain_rewards(**kwargs):
+        raise AssertionError("block-reward-events must not call chain rewards lookup")
+
+    monkeypatch.setattr(
+        "node_api.routes.v1.az_blocks.block_rewards",
+        _unexpected_chain_rewards,
+    )
+
+    response = client.get("/v1/translator/block-reward-events", headers=AUTH)
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["blockhash"] == SHARE_HASH
