@@ -4,461 +4,66 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from node_api.services.translator_candidate_blocks_store import TranslatorCandidateBlocksStore
 from node_api.settings import Settings, get_settings
 
+AUTH = {"Authorization": "Bearer testtoken"}
 
-def _settings(monkeypatch, tmp_path: Path) -> Settings:
-    db_path = tmp_path / "translator_blocks_found.sqlite3"
+
+def _db_path(name: str) -> Path:
+    path = Path.cwd() / name
+    for suffix in ("", "-wal", "-shm"):
+        candidate = Path(f"{path}{suffix}")
+        candidate.unlink(missing_ok=True)
+    return path
+
+
+def _settings(monkeypatch, db_name: str) -> Settings:
+    db_path = _db_path(db_name)
     monkeypatch.setenv("APP_ENV", "dev")
     monkeypatch.setenv("AUTH_MODE", "dev_token")
     monkeypatch.setenv("AZ_API_DEV_TOKEN", "testtoken")
-    monkeypatch.setenv("TRANSLATOR_BLOCKS_FOUND_DB_PATH", str(db_path))
+    monkeypatch.setenv("TRANSLATOR_CANDIDATE_BLOCKS_DB_PATH", str(db_path))
     monkeypatch.setenv("TRANSLATOR_LOG_PATH", "")
     get_settings.cache_clear()
     return get_settings()
 
 
-def _client(monkeypatch, tmp_path: Path) -> TestClient:
-    _settings(monkeypatch, tmp_path)
+def _client(monkeypatch, db_name: str) -> tuple[TestClient, TranslatorCandidateBlocksStore]:
+    settings = _settings(monkeypatch, db_name)
     from node_api import main as main_module
 
-    return TestClient(main_module.create_app())
+    return TestClient(main_module.create_app()), TranslatorCandidateBlocksStore.from_settings(
+        settings
+    )
 
 
-def _insert_event(client: TestClient, monkeypatch, tmp_path: Path, *, detected_time: int) -> None:
-    from node_api.services.translator_blocks_found_store import TranslatorBlocksFoundStore
-
-    settings = _settings(monkeypatch, tmp_path)
-    store = TranslatorBlocksFoundStore.from_settings(settings)
-    created = store.insert_event(
+def test_legacy_include_candidate_blocks_query_does_not_call_chain_lookup(
+    monkeypatch,
+) -> None:
+    client, store = _client(monkeypatch, ".codex_tcb_legacy_candidate_query.sqlite3")
+    store.insert_event(
         {
-            "identity_key": "worker-a",
-            "detected_time": detected_time,
-            "channel_id": 2,
+            "found_time": 1000,
+            "blockhash": "a" * 64,
             "worker_identity": "worker-a",
-            "authorized_worker_name": "worker-a",
-            "downstream_user_identity": "worker-a",
-            "upstream_user_identity": "upstream.worker-a",
-            "blocks_found_before": 0,
-            "blocks_found_after": 1,
-            "blocks_found_delta": 1,
-            "share_work_sum_at_detection": "1000",
-            "shares_acknowledged_at_detection": 10,
-            "shares_submitted_at_detection": 10,
-            "shares_rejected_at_detection": 0,
-            "blockhash": None,
-            "blockhash_status": "unresolved",
-            "correlation_status": "counter_delta_only",
-            "raw_snapshot_json": None,
+            "channel_id": 2,
         }
     )
-    assert created is True
 
+    def _boom(**kwargs):
+        raise AssertionError("blocks-found must not call /v1/az/blocks/rewards")
 
-def test_include_candidate_blocks_false_preserves_existing_behavior(
-    monkeypatch, tmp_path: Path
-) -> None:
-    client = _client(monkeypatch, tmp_path)
-    _insert_event(client, monkeypatch, tmp_path, detected_time=1000)
-
-    def _boom(*args, **kwargs):  # noqa: ANN002, ANN003
-        raise AssertionError("candidate enrichment should not run")
-
-    monkeypatch.setattr(
-        "node_api.routes.v1.translator.tbfc.enrich_events_with_candidate_blocks",
-        _boom,
-    )
+    monkeypatch.setattr("node_api.routes.v1.az_blocks.block_rewards", _boom)
 
     response = client.get(
         "/v1/translator/blocks-found",
-        headers={"Authorization": "Bearer testtoken"},
-    )
-
-    assert response.status_code == 200
-    item = response.json()["items"][0]
-    assert "candidate_count" not in item
-    assert item["blockhash"] is None
-
-
-def test_include_candidate_blocks_true_with_zero_candidates(
-    monkeypatch, tmp_path: Path
-) -> None:
-    client = _client(monkeypatch, tmp_path)
-    _insert_event(client, monkeypatch, tmp_path, detected_time=1000)
-
-    monkeypatch.setattr(
-        "node_api.services.translator_blocks_found_candidates.az_blocks_route.block_rewards",
-        lambda **kwargs: {"blocks": []},
-    )
-
-    response = client.get(
-        "/v1/translator/blocks-found",
-        params={"include_candidate_blocks": "true"},
-        headers={"Authorization": "Bearer testtoken"},
-    )
-
-    assert response.status_code == 200
-    item = response.json()["items"][0]
-    assert item["candidate_count"] == 0
-    assert item["candidate_window_seconds"] == 90
-    assert item["candidate_coinbase_total_sats"] is None
-    assert item["payout_ready"] is False
-    assert item["nearest_candidate_blockhash"] is None
-    assert item["candidate_blocks"] == []
-
-
-def test_default_candidate_window_seconds_is_90_when_omitted(
-    monkeypatch, tmp_path: Path
-) -> None:
-    client = _client(monkeypatch, tmp_path)
-    _insert_event(client, monkeypatch, tmp_path, detected_time=1000)
-    calls: list[dict] = []
-
-    def _fake_block_rewards(**kwargs):
-        calls.append(kwargs)
-        return {"blocks": []}
-
-    monkeypatch.setattr(
-        "node_api.services.translator_blocks_found_candidates.az_blocks_route.block_rewards",
-        _fake_block_rewards,
-    )
-
-    response = client.get(
-        "/v1/translator/blocks-found",
-        params={"include_candidate_blocks": "true"},
-        headers={"Authorization": "Bearer testtoken"},
-    )
-
-    assert response.status_code == 200
-    assert len(calls) == 1
-    assert calls[0]["start_time"] == 910
-    assert calls[0]["end_time"] == 1090
-    assert response.json()["items"][0]["candidate_window_seconds"] == 90
-
-
-def test_explicit_candidate_window_seconds_300_is_preserved(
-    monkeypatch, tmp_path: Path
-) -> None:
-    client = _client(monkeypatch, tmp_path)
-    _insert_event(client, monkeypatch, tmp_path, detected_time=1000)
-    calls: list[dict] = []
-
-    def _fake_block_rewards(**kwargs):
-        calls.append(kwargs)
-        return {"blocks": []}
-
-    monkeypatch.setattr(
-        "node_api.services.translator_blocks_found_candidates.az_blocks_route.block_rewards",
-        _fake_block_rewards,
-    )
-
-    response = client.get(
-        "/v1/translator/blocks-found",
-        params={
-            "include_candidate_blocks": "true",
-            "candidate_window_seconds": 300,
-        },
-        headers={"Authorization": "Bearer testtoken"},
-    )
-
-    assert response.status_code == 200
-    assert len(calls) == 1
-    assert calls[0]["start_time"] == 700
-    assert calls[0]["end_time"] == 1300
-    assert response.json()["items"][0]["candidate_window_seconds"] == 300
-
-
-def test_exactly_one_candidate_returns_resolved_blockhash_but_not_payout_ready_when_immature(
-    monkeypatch, tmp_path: Path
-) -> None:
-    client = _client(monkeypatch, tmp_path)
-    _insert_event(client, monkeypatch, tmp_path, detected_time=1000)
-
-    monkeypatch.setattr(
-        "node_api.services.translator_blocks_found_candidates.az_blocks_route.block_rewards",
-        lambda **kwargs: {
-            "blocks": [
-                {
-                    "height": 101,
-                    "blockhash": "a" * 64,
-                    "time": 1005,
-                    "mediantime": 1004,
-                    "coinbase_total_sats": 5000000000,
-                    "maturity_status": "immature",
-                    "confirmations": 10,
-                }
-            ]
-        },
-    )
-
-    response = client.get(
-        "/v1/translator/blocks-found",
-        params={"include_candidate_blocks": "true"},
-        headers={"Authorization": "Bearer testtoken"},
+        params={"include_candidate_blocks": "true", "candidate_window_seconds": 0},
+        headers=AUTH,
     )
 
     assert response.status_code == 200
     item = response.json()["items"][0]
     assert item["blockhash"] == "a" * 64
-    assert item["blockhash_status"] == "resolved"
-    assert item["correlation_status"] == "resolved_to_blockhash"
-    assert item["candidate_coinbase_total_sats"] == 5_000_000_000
-    assert item["payout_ready"] is False
-    assert item["nearest_candidate_blockhash"] == "a" * 64
-    assert item["candidate_count"] == 1
-    assert item["candidate_blocks"][0]["blockhash"] == "a" * 64
-
-
-def test_exactly_one_candidate_is_diagnostic_even_when_mature_main_chain_and_reward_present(
-    monkeypatch, tmp_path: Path
-) -> None:
-    client = _client(monkeypatch, tmp_path)
-    _insert_event(client, monkeypatch, tmp_path, detected_time=1000)
-
-    monkeypatch.setattr(
-        "node_api.services.translator_blocks_found_candidates.az_blocks_route.block_rewards",
-        lambda **kwargs: {
-            "blocks": [
-                {
-                    "height": 202,
-                    "blockhash": "e" * 64,
-                    "time": 1004,
-                    "mediantime": 1004,
-                    "coinbase_total_sats": 625000000,
-                    "maturity_status": "mature",
-                    "confirmations": 150,
-                    "is_on_main_chain": True,
-                }
-            ]
-        },
-    )
-
-    response = client.get(
-        "/v1/translator/blocks-found",
-        params={"include_candidate_blocks": "true"},
-        headers={"Authorization": "Bearer testtoken"},
-    )
-
-    assert response.status_code == 200
-    item = response.json()["items"][0]
-    assert item["blockhash"] == "e" * 64
-    assert item["blockhash_status"] == "resolved"
-    assert item["correlation_status"] == "resolved_to_blockhash"
-    assert item["candidate_coinbase_total_sats"] == 625_000_000
-    assert item["payout_ready"] is False
-    assert item["candidate_count"] == 1
-
-
-def test_multiple_candidates_are_sorted_by_abs_delta_seconds(
-    monkeypatch, tmp_path: Path
-) -> None:
-    client = _client(monkeypatch, tmp_path)
-    _insert_event(client, monkeypatch, tmp_path, detected_time=1000)
-
-    monkeypatch.setattr(
-        "node_api.services.translator_blocks_found_candidates.az_blocks_route.block_rewards",
-        lambda **kwargs: {
-            "blocks": [
-                {
-                    "height": 90,
-                    "blockhash": "c" * 64,
-                    "time": 1010,
-                    "mediantime": 1010,
-                    "coinbase_total_sats": 1,
-                    "maturity_status": "immature",
-                    "confirmations": 1,
-                },
-                {
-                    "height": 100,
-                    "blockhash": "a" * 64,
-                    "time": 1001,
-                    "mediantime": 1001,
-                    "coinbase_total_sats": 1,
-                    "maturity_status": "immature",
-                    "confirmations": 1,
-                },
-                {
-                    "height": 95,
-                    "blockhash": "b" * 64,
-                    "time": 1005,
-                    "mediantime": 1005,
-                    "coinbase_total_sats": 1,
-                    "maturity_status": "immature",
-                    "confirmations": 1,
-                },
-            ]
-        },
-    )
-
-    response = client.get(
-        "/v1/translator/blocks-found",
-        params={"include_candidate_blocks": "true"},
-        headers={"Authorization": "Bearer testtoken"},
-    )
-
-    assert response.status_code == 200
-    item = response.json()["items"][0]
-    assert item["blockhash"] is None
-    assert item["blockhash_status"] == "ambiguous"
-    assert item["correlation_status"] == "candidate_multiple_ambiguous"
-    assert item["candidate_coinbase_total_sats"] is None
-    assert item["payout_ready"] is False
-    blocks = item["candidate_blocks"]
-    assert [block["blockhash"] for block in blocks] == ["a" * 64, "b" * 64, "c" * 64]
-
-
-def test_candidate_limit_per_event_truncates_candidate_blocks(
-    monkeypatch, tmp_path: Path
-) -> None:
-    client = _client(monkeypatch, tmp_path)
-    _insert_event(client, monkeypatch, tmp_path, detected_time=1000)
-
-    monkeypatch.setattr(
-        "node_api.services.translator_blocks_found_candidates.az_blocks_route.block_rewards",
-        lambda **kwargs: {
-            "blocks": [
-                {
-                    "height": 10,
-                    "blockhash": "a" * 64,
-                    "time": 1001,
-                    "mediantime": 1001,
-                    "coinbase_total_sats": 1,
-                    "maturity_status": "immature",
-                    "confirmations": 1,
-                },
-                {
-                    "height": 9,
-                    "blockhash": "b" * 64,
-                    "time": 1002,
-                    "mediantime": 1002,
-                    "coinbase_total_sats": 1,
-                    "maturity_status": "immature",
-                    "confirmations": 1,
-                },
-                {
-                    "height": 8,
-                    "blockhash": "c" * 64,
-                    "time": 1003,
-                    "mediantime": 1003,
-                    "coinbase_total_sats": 1,
-                    "maturity_status": "immature",
-                    "confirmations": 1,
-                },
-            ]
-        },
-    )
-
-    response = client.get(
-        "/v1/translator/blocks-found",
-        params={
-            "include_candidate_blocks": "true",
-            "candidate_limit_per_event": 2,
-        },
-        headers={"Authorization": "Bearer testtoken"},
-    )
-
-    assert response.status_code == 200
-    item = response.json()["items"][0]
-    assert item["candidate_count"] == 3
-    assert len(item["candidate_blocks"]) == 2
-
-
-def test_no_candidates_preserve_unresolved_blockhash_fields(
-    monkeypatch, tmp_path: Path
-) -> None:
-    client = _client(monkeypatch, tmp_path)
-    _insert_event(client, monkeypatch, tmp_path, detected_time=1000)
-
-    monkeypatch.setattr(
-        "node_api.services.translator_blocks_found_candidates.az_blocks_route.block_rewards",
-        lambda **kwargs: {
-            "blocks": [
-                {
-                    "height": 101,
-                    "blockhash": "d" * 64,
-                    "time": 1105,
-                    "mediantime": 1105,
-                    "coinbase_total_sats": 5000000000,
-                    "maturity_status": "immature",
-                    "confirmations": 10,
-                }
-            ]
-        },
-    )
-
-    response = client.get(
-        "/v1/translator/blocks-found",
-        params={"include_candidate_blocks": "true"},
-        headers={"Authorization": "Bearer testtoken"},
-    )
-
-    assert response.status_code == 200
-    item = response.json()["items"][0]
-    assert item["blockhash"] is None
-    assert item["blockhash_status"] == "unresolved"
-    assert item["correlation_status"] == "counter_delta_only"
-    assert item["candidate_coinbase_total_sats"] is None
-    assert item["payout_ready"] is False
-
-
-def test_candidate_enrichment_uses_one_combined_chain_lookup(
-    monkeypatch, tmp_path: Path
-) -> None:
-    client = _client(monkeypatch, tmp_path)
-    _insert_event(client, monkeypatch, tmp_path, detected_time=1000)
-    _insert_event(client, monkeypatch, tmp_path, detected_time=1100)
-    calls: list[dict] = []
-
-    def _fake_block_rewards(**kwargs):
-        calls.append(kwargs)
-        return {"blocks": []}
-
-    monkeypatch.setattr(
-        "node_api.services.translator_blocks_found_candidates.az_blocks_route.block_rewards",
-        _fake_block_rewards,
-    )
-
-    response = client.get(
-        "/v1/translator/blocks-found",
-        params={
-            "include_candidate_blocks": "true",
-            "candidate_window_seconds": 90,
-            "candidate_time_field": "mediantime",
-        },
-        headers={"Authorization": "Bearer testtoken"},
-    )
-
-    assert response.status_code == 200
-    assert len(calls) == 1
-    assert calls[0]["owned_only"] is False
-    assert calls[0]["start_time"] == 910
-    assert calls[0]["end_time"] == 1190
-    assert calls[0]["time_field"] == "mediantime"
-
-
-def test_invalid_candidate_window_seconds_returns_422(
-    monkeypatch, tmp_path: Path
-) -> None:
-    client = _client(monkeypatch, tmp_path)
-
-    response = client.get(
-        "/v1/translator/blocks-found",
-        params={"include_candidate_blocks": "true", "candidate_window_seconds": 0},
-        headers={"Authorization": "Bearer testtoken"},
-    )
-
-    assert response.status_code == 422
-
-
-def test_invalid_candidate_time_field_returns_422(
-    monkeypatch, tmp_path: Path
-) -> None:
-    client = _client(monkeypatch, tmp_path)
-
-    response = client.get(
-        "/v1/translator/blocks-found",
-        params={"include_candidate_blocks": "true", "candidate_time_field": "bad"},
-        headers={"Authorization": "Bearer testtoken"},
-    )
-
-    assert response.status_code == 422
+    assert "candidate_blocks" not in item
+    assert "payout_ready" not in item

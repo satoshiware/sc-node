@@ -42,6 +42,22 @@ class Settings(BaseSettings):
         default=".data/translator_blocks_found.sqlite3",
         validation_alias="TRANSLATOR_BLOCKS_FOUND_DB_PATH",
     )
+    translator_candidate_blocks_db_path: str = Field(
+        default=".data/translator_candidate_blocks.sqlite3",
+        validation_alias="TRANSLATOR_CANDIDATE_BLOCKS_DB_PATH",
+    )
+    translator_capture_listen_host: str = Field(
+        default="127.0.0.1", validation_alias="TRANSLATOR_CAPTURE_LISTEN_HOST"
+    )
+    translator_capture_listen_port: int = Field(
+        default=3333, ge=1, le=65535, validation_alias="TRANSLATOR_CAPTURE_LISTEN_PORT"
+    )
+    translator_capture_upstream_host: str | None = Field(
+        default=None, validation_alias="TRANSLATOR_CAPTURE_UPSTREAM_HOST"
+    )
+    translator_capture_upstream_port: int | None = Field(
+        default=None, ge=1, le=65535, validation_alias="TRANSLATOR_CAPTURE_UPSTREAM_PORT"
+    )
 
     # Auth (stub)
     auth_mode: Literal["dev_token", "jwt"] | None = Field(
@@ -105,6 +121,24 @@ class Settings(BaseSettings):
         if isinstance(value, str) and not value.strip():
             return ".data/translator_blocks_found.sqlite3"
         return str(value).strip() if isinstance(value, str) else str(value)
+
+    @field_validator("translator_candidate_blocks_db_path", mode="before")
+    @classmethod
+    def _blank_translator_candidate_blocks_db_path(cls, value: object) -> str:
+        if value is None:
+            return ".data/translator_candidate_blocks.sqlite3"
+        if isinstance(value, str) and not value.strip():
+            return ".data/translator_candidate_blocks.sqlite3"
+        return str(value).strip() if isinstance(value, str) else str(value)
+
+    @field_validator("translator_capture_upstream_host", mode="before")
+    @classmethod
+    def _blank_translator_capture_upstream_host(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return str(value).strip() if isinstance(value, str) else value
 
     @model_validator(mode="before")
     @classmethod
