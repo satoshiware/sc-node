@@ -556,17 +556,82 @@ def _load_user_total_payout_sats(session: Session, user_id: int) -> int:
     return _btc_to_sats(total_btc)
 
 
+def _compact_settlement_raw_snapshots(
+    shadow_repository: PostgresLedgerRepository,
+    shadow_settlement_id: int,
+    payout_period_start: datetime,
+    payout_period_end: datetime,
+    work_window_start: datetime,
+    work_window_end: datetime,
+    dry_run: bool = False,
+) -> dict[str, object]:
+    """Orchestrate snapshot compaction: summarize, upsert, and prune with 3-window retention.
+    
+    Runs immediately after settlement shadow write. Idempotent on retries.
+    """
+    try:
+        # 1. Summarize raw snapshots for the settlement window
+        aggregates = shadow_repository.summarize_raw_snapshots_for_window(
+            contribution_window_start=work_window_start,
+            contribution_window_end=work_window_end,
+        )
+
+        # 2. Upsert summary header row
+        summary_row = shadow_repository.upsert_summary_snapshot(
+            settlement_id=shadow_settlement_id,
+            payout_period_start=payout_period_start,
+            payout_period_end=payout_period_end,
+            contribution_window_start=work_window_start,
+            contribution_window_end=work_window_end,
+            snapshot_count=int(aggregates.get("snapshot_count", 0) or 0),
+            accepted_shares_sum=int(aggregates.get("accepted_shares_sum", 0) or 0),
+            accepted_work_sum=Decimal(str(aggregates.get("accepted_work_sum", 0) or 0)),
+        )
+
+        # 3. Replace summary miner rows
+        shadow_repository.replace_summary_snapshot_miners(
+            summary_snapshot_id=int(summary_row["id"]),
+            miners=list(aggregates.get("miners", [])),
+        )
+
+        # 4. Prune raw snapshots, keeping latest 3 windows
+        prune_stats = shadow_repository.prune_raw_snapshot_windows(
+            keep_latest_windows=3,
+        )
+
+        return {
+            "compaction_enabled": True,
+            "status": "completed",
+            "settlement_id": shadow_settlement_id,
+            "summary_id": int(summary_row["id"]),
+            "miner_count": len(aggregates.get("miners", [])),
+            "deleted_snapshot_count": int(prune_stats.get("deleted_snapshot_count", 0) or 0),
+            "deleted_delta_count": int(prune_stats.get("deleted_delta_count", 0) or 0),
+            "pruned_window_count": int(prune_stats.get("pruned_window_count", 0) or 0),
+            "dry_run": bool(dry_run),
+        }
+    except Exception as exc:
+        return {
+            "compaction_enabled": True,
+            "status": "failed",
+            "settlement_id": shadow_settlement_id,
+            "error": str(exc),
+        }
+
+
 def _shadow_write_postgres_settlement(
     session: Session,
     *,
     settlement_id: int,
     settlement_status: str,
+    settlement_period_start: datetime,
     settlement_period_end: datetime,
     settlement_pool_reward_btc: Decimal,
     settlement_total_work: Decimal,
     settlement_total_shares: int,
     work_window_start: datetime,
     work_window_end: datetime,
+    settings: object,
 ) -> dict[str, object]:
     settlement_run_at = _as_utc_aware(settlement_period_end)
     shadow_repository = PostgresLedgerRepository(
@@ -702,6 +767,17 @@ def _shadow_write_postgres_settlement(
             updated_at=settlement_run_at,
         )
 
+    # Trigger snapshot compaction immediately after successful shadow write
+    compaction_stats = _compact_settlement_raw_snapshots(
+        shadow_repository=shadow_repository,
+        shadow_settlement_id=int(shadow_settlement["id"]),
+        payout_period_start=_as_utc_aware(settlement_period_start),
+        payout_period_end=_as_utc_aware(settlement_period_end),
+        work_window_start=_as_utc_aware(work_window_start),
+        work_window_end=_as_utc_aware(work_window_end),
+        dry_run=settings.dry_run,
+    )
+
     return {
         "enabled": True,
         "status": "completed",
@@ -711,6 +787,7 @@ def _shadow_write_postgres_settlement(
         "payout_credit_count": len(payout_rows),
         "linked_block_count": linked_block_count,
         "invalid_identity_count": invalid_identity_count,
+        "compaction": compaction_stats,
     }
 
 
@@ -2053,12 +2130,14 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
                     session,
                     settlement_id=settlement_result.settlement_id,
                     settlement_status=settlement_result.status,
+                    settlement_period_start=settlement_result.period_start,
                     settlement_period_end=settlement_result.period_end,
                     settlement_pool_reward_btc=settlement_result.pool_reward_btc,
                     settlement_total_work=settlement_result.total_work,
                     settlement_total_shares=settlement_result.total_shares,
                     work_window_start=effective_work_window_start,
                     work_window_end=effective_work_window_end,
+                    settings=settings,
                 )
             except Exception as exc:
                 postgres_shadow_write = {

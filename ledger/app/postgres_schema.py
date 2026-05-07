@@ -184,6 +184,105 @@ settlement_windows = Table(
 )
 Index("ix_settlement_windows_status", settlement_windows.c.status)
 
+summary_snapshot = Table(
+    "summary_snapshot",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column(
+        "settlement_id",
+        BIGINT,
+        ForeignKey(
+            "settlement_windows.id",
+            name="fk_summary_snapshot_settlement_id_settlement_windows",
+        ),
+        nullable=False,
+    ),
+    Column("payout_period_start", TIMESTAMP(timezone=True), nullable=False),
+    Column("payout_period_end", TIMESTAMP(timezone=True), nullable=False),
+    Column("contribution_window_start", TIMESTAMP(timezone=True), nullable=False),
+    Column("contribution_window_end", TIMESTAMP(timezone=True), nullable=False),
+    Column("snapshot_count", BIGINT, nullable=False, server_default=text("0")),
+    Column("accepted_shares_sum", BIGINT, nullable=False, server_default=text("0")),
+    Column("accepted_work_sum", Numeric(38, 16), nullable=False, server_default=text("0")),
+    Column("created_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")),
+    CheckConstraint(
+        "payout_period_end > payout_period_start",
+        name="ck_summary_snapshot_payout_period_order",
+    ),
+    CheckConstraint(
+        "contribution_window_end > contribution_window_start",
+        name="ck_summary_snapshot_contribution_window_order",
+    ),
+    CheckConstraint(
+        "snapshot_count >= 0",
+        name="ck_summary_snapshot_snapshot_count_nonnegative",
+    ),
+    CheckConstraint(
+        "accepted_shares_sum >= 0",
+        name="ck_summary_snapshot_accepted_shares_sum_nonnegative",
+    ),
+    CheckConstraint(
+        "accepted_work_sum >= 0",
+        name="ck_summary_snapshot_accepted_work_sum_nonnegative",
+    ),
+    UniqueConstraint("settlement_id", name="uq_summary_snapshot_settlement_id"),
+)
+Index(
+    "ix_summary_snapshot_contribution_window_start_contribution_window_end",
+    summary_snapshot.c.contribution_window_start,
+    summary_snapshot.c.contribution_window_end,
+)
+Index("ix_summary_snapshot_created_at", summary_snapshot.c.created_at)
+
+summary_snapshot_miner = Table(
+    "summary_snapshot_miner",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column(
+        "summary_snapshot_id",
+        BIGINT,
+        ForeignKey(
+            "summary_snapshot.id",
+            name="fk_summary_snapshot_miner_summary_snapshot_id_summary_snapshot",
+        ),
+        nullable=False,
+    ),
+    Column("worker_identity", TEXT, nullable=False),
+    Column("worker_name", TEXT),
+    Column("channel_id", BIGINT),
+    Column("snapshot_count", BIGINT, nullable=False, server_default=text("0")),
+    Column("accepted_shares_sum", BIGINT, nullable=False, server_default=text("0")),
+    Column("accepted_work_sum", Numeric(38, 16), nullable=False, server_default=text("0")),
+    Column("created_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")),
+    CheckConstraint(
+        "snapshot_count >= 0",
+        name="ck_summary_snapshot_miner_snapshot_count_nonnegative",
+    ),
+    CheckConstraint(
+        "accepted_shares_sum >= 0",
+        name="ck_summary_snapshot_miner_accepted_shares_sum_nonnegative",
+    ),
+    CheckConstraint(
+        "accepted_work_sum >= 0",
+        name="ck_summary_snapshot_miner_accepted_work_sum_nonnegative",
+    ),
+    UniqueConstraint(
+        "summary_snapshot_id",
+        "worker_identity",
+        "channel_id",
+        name="uq_summary_snapshot_miner_snapshot_worker_channel",
+    ),
+)
+Index(
+    "ix_summary_snapshot_miner_summary_snapshot_id",
+    summary_snapshot_miner.c.summary_snapshot_id,
+)
+Index(
+    "ix_summary_snapshot_miner_worker_identity_channel_id",
+    summary_snapshot_miner.c.worker_identity,
+    summary_snapshot_miner.c.channel_id,
+)
+
 settlement_blocks = Table(
     "settlement_blocks",
     metadata,

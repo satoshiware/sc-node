@@ -10,6 +10,9 @@ from sqlalchemy import (
     BigInteger,
     CheckConstraint,
     Column,
+    and_,
+    delete,
+    func,
     Index,
     Integer,
     Select,
@@ -34,6 +37,8 @@ from app.postgres_schema import (
     raw_miner_snapshots,
     service_cursors,
     settlement_blocks,
+    summary_snapshot,
+    summary_snapshot_miner,
     settlement_user_credits,
     settlement_user_work,
     settlement_windows,
@@ -105,6 +110,14 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
 
 def _clean_values(values: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in values.items() if value is not None}
+
+
+def _worker_name_from_identity(identity: str) -> str | None:
+    value = (identity or "").strip()
+    if not value or "." not in value:
+        return None
+    worker = value.split(".", 1)[1].strip()
+    return worker or None
 
 
 def _event_field(event: Mapping[str, Any] | Any, name: str) -> Any:
@@ -531,6 +544,231 @@ class PostgresLedgerRepository:
                 settlement_windows.c.work_window_end == work_window_end,
             )
         )
+
+    def summarize_raw_snapshots_for_window(
+        self,
+        *,
+        contribution_window_start: datetime,
+        contribution_window_end: datetime,
+    ) -> dict[str, Any]:
+        _require_tzaware("contribution_window_start", contribution_window_start)
+        _require_tzaware("contribution_window_end", contribution_window_end)
+
+        with self.session_factory() as session:
+            totals_row = session.execute(
+                select(
+                    func.count(raw_miner_snapshots.c.id),
+                    func.coalesce(func.sum(raw_miner_snapshots.c.accepted_shares_total), 0),
+                    func.coalesce(func.sum(raw_miner_snapshots.c.accepted_work_total), Decimal("0")),
+                ).where(
+                    raw_miner_snapshots.c.captured_at >= contribution_window_start,
+                    raw_miner_snapshots.c.captured_at < contribution_window_end,
+                )
+            ).one()
+
+            miner_rows = session.execute(
+                select(
+                    raw_miner_snapshots.c.identity,
+                    raw_miner_snapshots.c.channel_id,
+                    func.count(raw_miner_snapshots.c.id),
+                    func.coalesce(func.sum(raw_miner_snapshots.c.accepted_shares_total), 0),
+                    func.coalesce(func.sum(raw_miner_snapshots.c.accepted_work_total), Decimal("0")),
+                )
+                .where(
+                    raw_miner_snapshots.c.captured_at >= contribution_window_start,
+                    raw_miner_snapshots.c.captured_at < contribution_window_end,
+                )
+                .group_by(
+                    raw_miner_snapshots.c.identity,
+                    raw_miner_snapshots.c.channel_id,
+                )
+                .order_by(
+                    raw_miner_snapshots.c.identity.asc(),
+                    raw_miner_snapshots.c.channel_id.asc(),
+                )
+            ).all()
+
+        miners: list[dict[str, Any]] = []
+        for identity, channel_id, snapshot_count, shares_sum, work_sum in miner_rows:
+            identity_value = str(identity)
+            miners.append(
+                {
+                    "worker_identity": identity_value,
+                    "worker_name": _worker_name_from_identity(identity_value),
+                    "channel_id": channel_id,
+                    "snapshot_count": int(snapshot_count or 0),
+                    "accepted_shares_sum": int(shares_sum or 0),
+                    "accepted_work_sum": _as_decimal(work_sum or 0),
+                }
+            )
+
+        return {
+            "snapshot_count": int(totals_row[0] or 0),
+            "accepted_shares_sum": int(totals_row[1] or 0),
+            "accepted_work_sum": _as_decimal(totals_row[2] or 0),
+            "miners": miners,
+        }
+
+    def upsert_summary_snapshot(
+        self,
+        *,
+        settlement_id: int,
+        payout_period_start: datetime,
+        payout_period_end: datetime,
+        contribution_window_start: datetime,
+        contribution_window_end: datetime,
+        snapshot_count: int,
+        accepted_shares_sum: int,
+        accepted_work_sum: Decimal | int | str,
+        created_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        _require_tzaware("payout_period_start", payout_period_start)
+        _require_tzaware("payout_period_end", payout_period_end)
+        _require_tzaware("contribution_window_start", contribution_window_start)
+        _require_tzaware("contribution_window_end", contribution_window_end)
+        _require_tzaware("created_at", created_at)
+        statement = (
+            pg_insert(summary_snapshot)
+            .values(
+                settlement_id=settlement_id,
+                payout_period_start=payout_period_start,
+                payout_period_end=payout_period_end,
+                contribution_window_start=contribution_window_start,
+                contribution_window_end=contribution_window_end,
+                snapshot_count=snapshot_count,
+                accepted_shares_sum=accepted_shares_sum,
+                accepted_work_sum=_as_decimal(accepted_work_sum),
+                **({"created_at": created_at} if created_at is not None else {}),
+            )
+            .on_conflict_do_update(
+                index_elements=[summary_snapshot.c.settlement_id],
+                set_={
+                    "payout_period_start": payout_period_start,
+                    "payout_period_end": payout_period_end,
+                    "contribution_window_start": contribution_window_start,
+                    "contribution_window_end": contribution_window_end,
+                    "snapshot_count": snapshot_count,
+                    "accepted_shares_sum": accepted_shares_sum,
+                    "accepted_work_sum": _as_decimal(accepted_work_sum),
+                },
+            )
+            .returning(*summary_snapshot.c)
+        )
+        return self._execute_returning_one(statement)
+
+    def replace_summary_snapshot_miners(
+        self,
+        *,
+        summary_snapshot_id: int,
+        miners: list[dict[str, Any]],
+        created_at: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        _require_tzaware("created_at", created_at)
+
+        with self.session_factory() as session:
+            with session.begin():
+                session.execute(
+                    delete(summary_snapshot_miner).where(
+                        summary_snapshot_miner.c.summary_snapshot_id == summary_snapshot_id
+                    )
+                )
+
+                if not miners:
+                    return []
+
+                rows: list[dict[str, Any]] = []
+                for miner in miners:
+                    values = {
+                        "summary_snapshot_id": summary_snapshot_id,
+                        "worker_identity": str(miner["worker_identity"]),
+                        "worker_name": miner.get("worker_name"),
+                        "channel_id": miner.get("channel_id"),
+                        "snapshot_count": int(miner.get("snapshot_count", 0) or 0),
+                        "accepted_shares_sum": int(miner.get("accepted_shares_sum", 0) or 0),
+                        "accepted_work_sum": _as_decimal(miner.get("accepted_work_sum", 0) or 0),
+                        **({"created_at": created_at} if created_at is not None else {}),
+                    }
+                    row = session.execute(
+                        summary_snapshot_miner.insert()
+                        .values(**values)
+                        .returning(*summary_snapshot_miner.c)
+                    ).one()
+                    rows.append(_row_to_dict(row))
+        return rows
+
+    def list_summary_snapshots(self, limit: int = 100) -> list[dict[str, Any]]:
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        return self._select_all(
+            select(summary_snapshot)
+            .order_by(summary_snapshot.c.contribution_window_end.desc(), summary_snapshot.c.id.desc())
+            .limit(limit)
+        )
+
+    def prune_raw_snapshot_windows(self, *, keep_latest_windows: int = 3) -> dict[str, Any]:
+        if keep_latest_windows < 1:
+            raise ValueError("keep_latest_windows must be positive")
+
+        with self.session_factory() as session:
+            with session.begin():
+                windows = session.execute(
+                    select(
+                        settlement_windows.c.work_window_start,
+                        settlement_windows.c.work_window_end,
+                    )
+                    .order_by(
+                        settlement_windows.c.work_window_end.desc(),
+                        settlement_windows.c.id.desc(),
+                    )
+                ).all()
+
+                prune_windows = windows[keep_latest_windows:]
+                if not prune_windows:
+                    return {
+                        "deleted_snapshot_count": 0,
+                        "deleted_delta_count": 0,
+                        "pruned_window_count": 0,
+                    }
+
+                deleted_snapshot_count = 0
+                deleted_delta_count = 0
+
+                for window_start, window_end in prune_windows:
+                    snapshot_id_subquery = (
+                        select(raw_miner_snapshots.c.id)
+                        .where(
+                            raw_miner_snapshots.c.captured_at >= window_start,
+                            raw_miner_snapshots.c.captured_at < window_end,
+                        )
+                    )
+
+                    delete_deltas_result = session.execute(
+                        delete(miner_work_deltas).where(
+                            (miner_work_deltas.c.from_snapshot_id.in_(snapshot_id_subquery))
+                            | (miner_work_deltas.c.to_snapshot_id.in_(snapshot_id_subquery))
+                            | (
+                                and_(
+                                    miner_work_deltas.c.interval_start >= window_start,
+                                    miner_work_deltas.c.interval_end <= window_end,
+                                )
+                            )
+                        )
+                    )
+                    deleted_delta_count += int(delete_deltas_result.rowcount or 0)
+
+                    delete_snapshots_result = session.execute(
+                        delete(raw_miner_snapshots).where(
+                            raw_miner_snapshots.c.captured_at >= window_start,
+                            raw_miner_snapshots.c.captured_at < window_end,
+                        )
+                    )
+                    deleted_snapshot_count += int(delete_snapshots_result.rowcount or 0)
+
+        return {
+            "deleted_snapshot_count": deleted_snapshot_count,
+            "deleted_delta_count": deleted_delta_count,
+            "pruned_window_count": len(prune_windows),
+        }
 
     def link_settlement_block(
         self,

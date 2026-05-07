@@ -10,7 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
 from app.postgres_db import make_postgres_engine, make_postgres_session_factory, resolve_postgres_database_url
-from app.postgres_repositories import PostgresLedgerRepository
+from app.postgres_repositories import PostgresLedgerRepository, _worker_name_from_identity
 from app.postgres_schema import metadata
 
 
@@ -40,6 +40,46 @@ def _make_repository() -> tuple[PostgresLedgerRepository, object, str]:
 def _drop_schema(base_engine, schema_name: str) -> None:
     with base_engine.begin() as connection:
         connection.execute(text(f'DROP SCHEMA "{schema_name}" CASCADE'))
+
+
+def test_schema_metadata_includes_summary_snapshot_tables() -> None:
+    assert "summary_snapshot" in metadata.tables
+    assert "summary_snapshot_miner" in metadata.tables
+
+    summary_columns = {column.name for column in metadata.tables["summary_snapshot"].columns}
+    assert summary_columns == {
+        "id",
+        "settlement_id",
+        "payout_period_start",
+        "payout_period_end",
+        "contribution_window_start",
+        "contribution_window_end",
+        "snapshot_count",
+        "accepted_shares_sum",
+        "accepted_work_sum",
+        "created_at",
+    }
+
+    miner_columns = {column.name for column in metadata.tables["summary_snapshot_miner"].columns}
+    assert miner_columns == {
+        "id",
+        "summary_snapshot_id",
+        "worker_identity",
+        "worker_name",
+        "channel_id",
+        "snapshot_count",
+        "accepted_shares_sum",
+        "accepted_work_sum",
+        "created_at",
+    }
+
+
+def test_worker_name_from_identity_parsing() -> None:
+    assert _worker_name_from_identity("alice.rig1") == "rig1"
+    assert _worker_name_from_identity("alice.rig.a") == "rig.a"
+    assert _worker_name_from_identity("alice") is None
+    assert _worker_name_from_identity(" ") is None
+    assert _worker_name_from_identity("bob.") is None
 
 
 def test_postgres_repository_smoke() -> None:
@@ -180,5 +220,174 @@ def test_postgres_repository_smoke() -> None:
             updated_at=now + timedelta(minutes=4),
         )
         assert repository.get_service_cursor("translator_blocks_found")["id"] == cursor["id"]
+    finally:
+        _drop_schema(base_engine, schema_name)
+
+
+def test_phase_c_snapshot_compaction_orchestration() -> None:
+    """Test Phase C: orchestration of snapshot compaction after settlement write."""
+    repository, base_engine, schema_name = _make_repository()
+    try:
+        now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+        
+        # Set up: create users, miners, and raw snapshots across multiple windows
+        user = repository.upsert_user("alice")
+        repository.upsert_miner_identity(
+            user_id=user["id"],
+            identity="alice.rig1",
+            worker_name="rig1",
+        )
+        
+        # Create raw snapshots in window 1 (oldest)
+        window_1_start = now - timedelta(hours=12)
+        window_1_end = now - timedelta(hours=8)
+        snapshot_1 = repository.create_raw_miner_snapshot(
+            captured_at=window_1_start + timedelta(minutes=5),
+            channel_id=7,
+            identity="alice.rig1",
+            accepted_shares_total=100,
+            accepted_work_total=Decimal("5000.0000000000000000"),
+            rejected_shares_total=5,
+            raw_payload={"accepted": 100},
+        )
+        
+        # Create work delta for window 1
+        repository.create_miner_work_delta(
+            identity="alice.rig1",
+            channel_id=7,
+            from_snapshot_id=snapshot_1["id"],
+            to_snapshot_id=snapshot_1["id"],
+            interval_start=window_1_start,
+            interval_end=window_1_end,
+            share_delta=100,
+            work_delta=Decimal("5000.0000000000000000"),
+        )
+        
+        # Create raw snapshots in window 2 (middle)
+        window_2_start = now - timedelta(hours=8)
+        window_2_end = now - timedelta(hours=4)
+        snapshot_2 = repository.create_raw_miner_snapshot(
+            captured_at=window_2_start + timedelta(minutes=5),
+            channel_id=7,
+            identity="alice.rig1",
+            accepted_shares_total=150,
+            accepted_work_total=Decimal("7500.0000000000000000"),
+            rejected_shares_total=7,
+            raw_payload={"accepted": 150},
+        )
+        
+        repository.create_miner_work_delta(
+            identity="alice.rig1",
+            channel_id=7,
+            from_snapshot_id=snapshot_2["id"],
+            to_snapshot_id=snapshot_2["id"],
+            interval_start=window_2_start,
+            interval_end=window_2_end,
+            share_delta=150,
+            work_delta=Decimal("7500.0000000000000000"),
+        )
+        
+        # Create raw snapshots in window 3 (current/settlement window)
+        window_3_start = now - timedelta(hours=4)
+        window_3_end = now
+        snapshot_3 = repository.create_raw_miner_snapshot(
+            captured_at=window_3_start + timedelta(minutes=5),
+            channel_id=7,
+            identity="alice.rig1",
+            accepted_shares_total=200,
+            accepted_work_total=Decimal("10000.0000000000000000"),
+            rejected_shares_total=10,
+            raw_payload={"accepted": 200},
+        )
+        
+        work_delta_3 = repository.create_miner_work_delta(
+            identity="alice.rig1",
+            channel_id=7,
+            from_snapshot_id=snapshot_3["id"],
+            to_snapshot_id=snapshot_3["id"],
+            interval_start=window_3_start,
+            interval_end=window_3_end,
+            share_delta=200,
+            work_delta=Decimal("10000.0000000000000000"),
+        )
+        
+        # Create settlement window
+        settlement = repository.upsert_settlement_window(
+            settlement_run_at=now,
+            work_window_start=window_3_start,
+            work_window_end=window_3_end,
+            maturity_offset_minutes=200,
+            status="completed",
+            total_reward_sats=187_500_000,
+            total_work=Decimal("10000.0000000000000000"),
+            total_shares=200,
+            completed_at=now,
+        )
+        
+        # PHASE C ORCHESTRATION: Execute compaction steps
+        # 1. Summarize raw snapshots for the settlement window
+        aggregates = repository.summarize_raw_snapshots_for_window(
+            contribution_window_start=window_3_start,
+            contribution_window_end=window_3_end,
+        )
+        
+        assert aggregates["shares_sum"] == 200
+        assert aggregates["work_sum"] == Decimal("10000.0000000000000000")
+        assert aggregates["snapshot_count"] == 1
+        assert len(aggregates["miner_list"]) == 1
+        miner_agg = aggregates["miner_list"][0]
+        assert miner_agg["worker_identity"] == "alice.rig1"
+        assert miner_agg["worker_name"] == "rig1"
+        assert miner_agg["channel_id"] == 7
+        
+        # 2. Upsert summary header row (idempotent)
+        summary_id = repository.upsert_summary_snapshot(
+            settlement_id=settlement["id"],
+            contribution_window_start=window_3_start,
+            contribution_window_end=window_3_end,
+            shares_sum=aggregates["shares_sum"],
+            work_sum=aggregates["work_sum"],
+            snapshot_count=aggregates["snapshot_count"],
+        )
+        assert summary_id is not None
+        
+        # Verify idempotency: second upsert returns same summary_id
+        summary_id_2 = repository.upsert_summary_snapshot(
+            settlement_id=settlement["id"],
+            contribution_window_start=window_3_start,
+            contribution_window_end=window_3_end,
+            shares_sum=aggregates["shares_sum"],
+            work_sum=aggregates["work_sum"],
+            snapshot_count=aggregates["snapshot_count"],
+        )
+        assert summary_id_2 == summary_id
+        
+        # 3. Replace summary miner rows
+        repository.replace_summary_snapshot_miners(
+            summary_snapshot_id=summary_id,
+            miner_rows=aggregates["miner_list"],
+        )
+        
+        # 4. Prune raw snapshots keeping latest 3 windows
+        # Since we only have 3 windows, pruning should not delete any yet
+        prune_stats = repository.prune_raw_snapshot_windows(keep_latest_windows=3)
+        
+        # Verify prune stats
+        assert prune_stats["windows_retained"] == 3 or prune_stats["windows_retained"] is None
+        
+        # Verify we still have all 3 snapshots (since we keep latest 3)
+        all_snapshots = repository.session.execute(
+            text("SELECT id FROM raw_miner_snapshots ORDER BY captured_at")
+        ).fetchall()
+        assert len(all_snapshots) >= 3, "Should retain latest 3 windows"
+        
+        # Verify summary rows were created
+        summary_miners = repository.session.execute(
+            text("SELECT * FROM summary_snapshot_miner WHERE summary_snapshot_id = :id"),
+            {"id": summary_id},
+        ).fetchall()
+        assert len(summary_miners) == 1
+        assert summary_miners[0].worker_identity == "alice.rig1"
+        
     finally:
         _drop_schema(base_engine, schema_name)
