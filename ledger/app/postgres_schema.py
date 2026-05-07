@@ -228,7 +228,7 @@ summary_snapshot = Table(
     UniqueConstraint("settlement_id", name="uq_summary_snapshot_settlement_id"),
 )
 Index(
-    "ix_summary_snapshot_contribution_window_start_contribution_window_end",
+    "ix_summary_snapshot_contrib_window",
     summary_snapshot.c.contribution_window_start,
     summary_snapshot.c.contribution_window_end,
 )

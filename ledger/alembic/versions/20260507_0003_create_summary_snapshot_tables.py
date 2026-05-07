@@ -64,7 +64,7 @@ def upgrade() -> None:
         sa.UniqueConstraint("settlement_id", name="uq_summary_snapshot_settlement_id"),
     )
     op.create_index(
-        "ix_summary_snapshot_contribution_window_start_contribution_window_end",
+        "ix_summary_snapshot_contrib_window",
         "summary_snapshot",
         ["contribution_window_start", "contribution_window_end"],
         unique=False,
@@ -146,7 +146,7 @@ def downgrade() -> None:
         table_name="summary_snapshot",
     )
     op.drop_index(
-        "ix_summary_snapshot_contribution_window_start_contribution_window_end",
+        "ix_summary_snapshot_contrib_window",
         table_name="summary_snapshot",
     )
     op.drop_table("summary_snapshot")
