@@ -221,7 +221,7 @@ def run_settlement_postgres(
 
     latest_settlement = repository.get_latest_settlement_window()
 
-    period_end = now
+    period_end = now_aware
     if latest_settlement is None:
         period_start = period_end - timedelta(minutes=interval)
     else:
