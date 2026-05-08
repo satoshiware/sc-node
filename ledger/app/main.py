@@ -36,7 +36,9 @@ from app.models import BlockCounterState, PayoutEvent, Settlement, SnapshotBlock
 from app.poller import poll_channels_once_with_blocks, poll_metrics_once, upsert_snapshot_blocks
 from app.pool_client import PoolApiError, fetch_block_rewards_by_hashes, fetch_blocks_found_in_window
 from app.postgres_db import make_postgres_engine, make_postgres_session_factory
+from app.postgres_delta import compute_user_contribution_deltas_postgres
 from app.postgres_repositories import PostgresLedgerRepository
+from app.postgres_settlement import run_settlement_postgres
 from app.postgres_shadow_compare import (
     audit_postgres_shadow_settlements,
     compare_postgres_shadow_settlement,
@@ -640,7 +642,16 @@ def _shadow_write_postgres_settlement(
 
     payout_rows = _load_settlement_payout_rows(session, settlement_id)
     block_rows = _load_settlement_block_models(session, settlement_id)
-    user_contributions = compute_user_contribution_deltas(session, work_window_start, work_window_end)
+    contribution_source = "postgres"
+    try:
+        user_contributions = compute_user_contribution_deltas_postgres(
+            shadow_repository,
+            _as_utc_aware(work_window_start),
+            _as_utc_aware(work_window_end),
+        )
+    except Exception:
+        contribution_source = "sqlite_fallback"
+        user_contributions = compute_user_contribution_deltas(session, work_window_start, work_window_end)
     use_work_basis = _uses_work_basis_for_shadow_write(user_contributions, payout_rows)
     maturity_offset_minutes = max(
         0,
@@ -648,6 +659,7 @@ def _shadow_write_postgres_settlement(
     )
 
     shadow_settlement = shadow_repository.upsert_settlement_window(
+        sqlite_settlement_id=settlement_id,
         settlement_run_at=settlement_run_at,
         work_window_start=_as_utc_aware(work_window_start),
         work_window_end=_as_utc_aware(work_window_end),
@@ -783,6 +795,7 @@ def _shadow_write_postgres_settlement(
         "status": "completed",
         "settlement_id": settlement_id,
         "shadow_settlement_id": int(shadow_settlement["id"]),
+        "contribution_source": contribution_source,
         "user_count": len(usernames),
         "payout_credit_count": len(payout_rows),
         "linked_block_count": linked_block_count,
@@ -1849,6 +1862,22 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
     block_reward_btc = Decimal(str(settings.block_reward_btc or "1.87500000"))
     attempt_id = str(uuid.uuid4())
     postgres_shadow_write: dict[str, object] | None = None
+    postgres_polling_repository: PostgresLedgerRepository | None = None
+
+    if settings.postgres_ledger_shadow_write_enabled:
+        try:
+            postgres_polling_repository = PostgresLedgerRepository(
+                make_postgres_session_factory(make_postgres_engine())
+            )
+        except Exception as exc:
+            postgres_polling_repository = None
+            _write_scheduler_event(
+                "postgres_polling_shadow_writer_init_failed",
+                {
+                    "error": str(exc),
+                    "traceback": traceback.format_exc(),
+                },
+            )
 
     with _new_session() as session:
         attempt_time = datetime.now(UTC).replace(tzinfo=None)
@@ -1877,6 +1906,7 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
                 settings.translator_channels_url,
                 downstream_url=settings.translator_downstreams_url,
                 bearer_token=settings.translator_bearer_token,
+                raw_snapshot_writer=postgres_polling_repository,
             )
             if reward_mode == "blocks":
                 interval_blocks, block_delta_details = _compute_interval_blocks_delta(
@@ -1893,7 +1923,11 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
                 }
                 reward_fetcher = lambda _start, _end: computed_reward
         else:
-            snapshots_created = poll_metrics_once(session, settings.translator_metrics_url)
+            snapshots_created = poll_metrics_once(
+                session,
+                settings.translator_metrics_url,
+                raw_snapshot_writer=postgres_polling_repository,
+            )
 
         should_settle = force_settlement
         if not should_settle:
@@ -2070,11 +2104,35 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
             settlement_kwargs["work_window_start"] = matured_start
             settlement_kwargs["work_window_end"] = matured_end
 
-        settlement_result = run_settlement(
-            session,
-            attempt_time,
-            **settlement_kwargs,
-        )
+        settlement_engine = "sqlite"
+        if settings.postgres_settlement_engine_enabled and postgres_polling_repository is not None:
+            try:
+                settlement_result = run_settlement_postgres(
+                    postgres_polling_repository,
+                    attempt_time,
+                    **settlement_kwargs,
+                )
+                settlement_engine = "postgres"
+            except Exception as exc:
+                settlement_engine = "sqlite_fallback"
+                _write_scheduler_event(
+                    "postgres_settlement_engine_failed",
+                    {
+                        "error": str(exc),
+                        "traceback": traceback.format_exc(),
+                    },
+                )
+                settlement_result = run_settlement(
+                    session,
+                    attempt_time,
+                    **settlement_kwargs,
+                )
+        else:
+            settlement_result = run_settlement(
+                session,
+                attempt_time,
+                **settlement_kwargs,
+            )
 
         if settings.enable_settlement_replay_hook:
             try:
@@ -2110,6 +2168,7 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
             block_reward=block_reward_payload,
             contribution_window_start=settlement_kwargs.get("work_window_start"),
             contribution_window_end=settlement_kwargs.get("work_window_end"),
+            settlement_engine=settlement_engine,
         )
         try:
             write_payout_audit_log(settings.payout_audit_log_path, audit_event)
@@ -2122,7 +2181,7 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
                 },
             )
 
-        if settings.postgres_ledger_shadow_write_enabled:
+        if settings.postgres_ledger_shadow_write_enabled and settlement_engine != "postgres":
             effective_work_window_start = settlement_kwargs.get("work_window_start") or settlement_result.period_start
             effective_work_window_end = settlement_kwargs.get("work_window_end") or settlement_result.period_end
             try:
@@ -2154,6 +2213,13 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
                         "traceback": traceback.format_exc(),
                     },
                 )
+        elif settlement_engine == "postgres":
+            postgres_shadow_write = {
+                "enabled": True,
+                "status": "skipped_postgres_settlement_engine",
+                "settlement_id": settlement_result.settlement_id,
+                "note": "Postgres settlement already persisted to Postgres.",
+            }
 
     response = {
         "snapshots_created": snapshots_created,

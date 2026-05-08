@@ -92,6 +92,12 @@ class Settings:
     db_path: str = DEFAULT_DB_PATH
     dry_run: bool = True
     postgres_ledger_shadow_write_enabled: bool = False
+    postgres_settlement_engine_enabled: bool = False
+    postgres_sender_enabled: bool = False
+    postgres_primary_session_enabled: bool = False
+    postgres_primary_session_fallback_to_sqlite: bool = True
+    sqlite_retirement_mode_enabled: bool = False
+    sqlite_runtime_writes_enabled: bool = True
     postgres_ledger_reads_enabled: bool = False
     postgres_ledger_read_fallback_to_sqlite: bool = True
     postgres_ledger_read_require_shadow_match: bool = True
@@ -181,6 +187,30 @@ def load_settings() -> Settings:
         postgres_ledger_shadow_write_enabled=_parse_env_bool(
             os.getenv("POSTGRES_LEDGER_SHADOW_WRITE_ENABLED"),
             default=False,
+        ),
+        postgres_settlement_engine_enabled=_parse_env_bool(
+            os.getenv("POSTGRES_SETTLEMENT_ENGINE_ENABLED"),
+            default=False,
+        ),
+        postgres_sender_enabled=_parse_env_bool(
+            os.getenv("POSTGRES_SENDER_ENABLED"),
+            default=False,
+        ),
+        postgres_primary_session_enabled=_parse_env_bool(
+            os.getenv("POSTGRES_PRIMARY_SESSION_ENABLED"),
+            default=False,
+        ),
+        postgres_primary_session_fallback_to_sqlite=_parse_env_bool(
+            os.getenv("POSTGRES_PRIMARY_SESSION_FALLBACK_TO_SQLITE"),
+            default=True,
+        ),
+        sqlite_retirement_mode_enabled=_parse_env_bool(
+            os.getenv("SQLITE_RETIREMENT_MODE_ENABLED"),
+            default=False,
+        ),
+        sqlite_runtime_writes_enabled=_parse_env_bool(
+            os.getenv("SQLITE_RUNTIME_WRITES_ENABLED"),
+            default=True,
         ),
         postgres_ledger_reads_enabled=_parse_env_bool(
             os.getenv("POSTGRES_LEDGER_READS_ENABLED"),

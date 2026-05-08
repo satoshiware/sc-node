@@ -227,6 +227,7 @@ def build_payout_audit_event(
     block_reward: dict[str, object] | None = None,
     contribution_window_start: datetime | None = None,
     contribution_window_end: datetime | None = None,
+    settlement_engine: str = "sqlite",
 ) -> dict[str, object]:
     effective_contribution_window_start = contribution_window_start or period_start
     effective_contribution_window_end = contribution_window_end or period_end
@@ -267,6 +268,7 @@ def build_payout_audit_event(
             "pool_reward_btc": _to_decimal_str(pool_reward_btc),
             "total_work": _to_decimal_str(total_work_btc_basis),
             "total_shares": int(total_share_delta),
+            "engine": settlement_engine,
         },
         "snapshot_alignment": snapshot_alignment,
         "user_contributions": user_contributions,

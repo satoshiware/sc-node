@@ -82,6 +82,51 @@ def test_worker_name_from_identity_parsing() -> None:
     assert _worker_name_from_identity("bob.") is None
 
 
+def test_schema_metadata_includes_runtime_state_tables() -> None:
+    assert "carry_state" in metadata.tables
+    assert "work_accrual_bucket" in metadata.tables
+    assert "payout_events" in metadata.tables
+    assert "block_counter_state" in metadata.tables
+
+    carry_columns = {column.name for column in metadata.tables["carry_state"].columns}
+    assert carry_columns == {
+        "id",
+        "bucket",
+        "carry_btc",
+        "updated_at",
+    }
+
+    accrual_columns = {column.name for column in metadata.tables["work_accrual_bucket"].columns}
+    assert accrual_columns == {
+        "id",
+        "user_id",
+        "accumulated_work",
+        "updated_at",
+    }
+
+    payout_event_columns = {column.name for column in metadata.tables["payout_events"].columns}
+    assert payout_event_columns == {
+        "id",
+        "settlement_credit_id",
+        "payload_json",
+        "status",
+        "created_at",
+    }
+
+    block_counter_columns = {column.name for column in metadata.tables["block_counter_state"].columns}
+    assert block_counter_columns == {
+        "id",
+        "channel_id",
+        "last_blocks_found_total",
+        "updated_at",
+    }
+
+
+def test_schema_metadata_includes_sqlite_settlement_mapping_column() -> None:
+    settlement_columns = {column.name for column in metadata.tables["settlement_windows"].columns}
+    assert "sqlite_settlement_id" in settlement_columns
+
+
 def test_postgres_repository_smoke() -> None:
     repository, base_engine, schema_name = _make_repository()
     try:
@@ -136,6 +181,7 @@ def test_postgres_repository_smoke() -> None:
         assert repository.get_block_reward("blockhash-001")["reward_sats"] == 187_500_000
 
         settlement = repository.upsert_settlement_window(
+            sqlite_settlement_id=101,
             settlement_run_at=now + timedelta(hours=4),
             work_window_start=now - timedelta(hours=8, minutes=200),
             work_window_end=now - timedelta(minutes=200),
@@ -145,11 +191,13 @@ def test_postgres_repository_smoke() -> None:
             total_work=Decimal("1250.5000000000000000"),
             total_shares=25,
         )
+        assert settlement["sqlite_settlement_id"] == 101
         same_settlement = repository.get_settlement_window_by_range(
             work_window_start=settlement["work_window_start"],
             work_window_end=settlement["work_window_end"],
         )
         assert same_settlement["id"] == settlement["id"]
+        assert same_settlement["sqlite_settlement_id"] == 101
 
         settlement_block = repository.link_settlement_block(
             settlement_id=settlement["id"],

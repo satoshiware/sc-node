@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Dict
+from typing import Any, Dict, Protocol
 
 import requests
 from sqlalchemy import select
@@ -11,6 +11,21 @@ from sqlalchemy.orm import Session
 
 from app.metrics_parser import parse_accepted_shares
 from app.models import MetricSnapshot, SnapshotBlock
+
+
+class RawSnapshotWriter(Protocol):
+    def create_raw_miner_snapshot(
+        self,
+        *,
+        captured_at: datetime,
+        identity: str,
+        accepted_shares_total: int,
+        accepted_work_total: Decimal | int | str,
+        channel_id: int | None = None,
+        rejected_shares_total: int = 0,
+        source: str = "translator",
+        raw_payload: dict[str, Any] | list[Any] | None = None,
+    ) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True)
@@ -54,21 +69,41 @@ def fetch_downstream_payload(
     return response.json()
 
 
-def persist_metric_snapshots(session: Session, counters_by_identity: Dict[str, int]) -> int:
+def persist_metric_snapshots(
+    session: Session,
+    counters_by_identity: Dict[str, int],
+    *,
+    raw_snapshot_writer: RawSnapshotWriter | None = None,
+    sqlite_write_enabled: bool = True,
+) -> int:
     now_utc_naive = datetime.now(UTC).replace(tzinfo=None)
+    now_utc_aware = now_utc_naive.replace(tzinfo=UTC)
     created = 0
     for identity, accepted_total in counters_by_identity.items():
-        session.add(
-            MetricSnapshot(
-                identity=identity,
-                accepted_shares_total=accepted_total,
-                accepted_work_total=0,
-                shares_rejected_total=0,
-                created_at=now_utc_naive,
+        if sqlite_write_enabled:
+            session.add(
+                MetricSnapshot(
+                    identity=identity,
+                    accepted_shares_total=accepted_total,
+                    accepted_work_total=0,
+                    shares_rejected_total=0,
+                    created_at=now_utc_naive,
+                )
             )
-        )
+        if raw_snapshot_writer is not None:
+            raw_snapshot_writer.create_raw_miner_snapshot(
+                captured_at=now_utc_aware,
+                channel_id=None,
+                identity=identity,
+                accepted_shares_total=int(accepted_total),
+                accepted_work_total=Decimal("0"),
+                rejected_shares_total=0,
+                source="translator_metrics",
+                raw_payload={"identity": identity, "accepted_shares_total": int(accepted_total)},
+            )
         created += 1
-    session.commit()
+    if sqlite_write_enabled:
+        session.commit()
     return created
 
 
@@ -174,32 +209,70 @@ def parse_blocks_found_by_channel(payload: dict[str, Any]) -> dict[int, int]:
     return counters
 
 
-def persist_channel_snapshots(session: Session, channel_snapshots: list[ChannelSnapshot]) -> int:
+def persist_channel_snapshots(
+    session: Session,
+    channel_snapshots: list[ChannelSnapshot],
+    *,
+    raw_snapshot_writer: RawSnapshotWriter | None = None,
+    sqlite_write_enabled: bool = True,
+) -> int:
     now_utc_naive = datetime.now(UTC).replace(tzinfo=None)
+    now_utc_aware = now_utc_naive.replace(tzinfo=UTC)
     created = 0
     for snapshot in channel_snapshots:
-        session.add(
-            MetricSnapshot(
+        if sqlite_write_enabled:
+            session.add(
+                MetricSnapshot(
+                    channel_id=snapshot.channel_id,
+                    identity=snapshot.identity,
+                    accepted_shares_total=snapshot.accepted_shares_total,
+                    accepted_work_total=snapshot.accepted_work_total,
+                    shares_rejected_total=snapshot.shares_rejected_total,
+                    created_at=now_utc_naive,
+                )
+            )
+        if raw_snapshot_writer is not None:
+            raw_snapshot_writer.create_raw_miner_snapshot(
+                captured_at=now_utc_aware,
                 channel_id=snapshot.channel_id,
                 identity=snapshot.identity,
-                accepted_shares_total=snapshot.accepted_shares_total,
+                accepted_shares_total=int(snapshot.accepted_shares_total),
                 accepted_work_total=snapshot.accepted_work_total,
-                shares_rejected_total=snapshot.shares_rejected_total,
-                created_at=now_utc_naive,
+                rejected_shares_total=int(snapshot.shares_rejected_total),
+                source="translator_channels",
+                raw_payload={
+                    "channel_id": snapshot.channel_id,
+                    "identity": snapshot.identity,
+                    "accepted_shares_total": int(snapshot.accepted_shares_total),
+                    "accepted_work_total": str(snapshot.accepted_work_total),
+                    "shares_rejected_total": int(snapshot.shares_rejected_total),
+                },
             )
-        )
         created += 1
 
-    session.commit()
+    if sqlite_write_enabled:
+        session.commit()
     return created
 
 
-def poll_metrics_once(session: Session, metrics_url: str, timeout_seconds: int = 10) -> int:
+def poll_metrics_once(
+    session: Session,
+    metrics_url: str,
+    timeout_seconds: int = 10,
+    *,
+    raw_snapshot_writer: RawSnapshotWriter | None = None,
+    sqlite_write_enabled: bool = True,
+) -> int:
     metrics_text = fetch_metrics(metrics_url, timeout_seconds=timeout_seconds)
     counters_by_identity = parse_accepted_shares(metrics_text)
     if not counters_by_identity:
         return 0
-    return persist_metric_snapshots(session, counters_by_identity)
+    return persist_metric_snapshots(
+        session,
+        counters_by_identity,
+        raw_snapshot_writer=raw_snapshot_writer,
+        sqlite_write_enabled=sqlite_write_enabled,
+    )
 
 
 def poll_channels_once(
@@ -208,6 +281,9 @@ def poll_channels_once(
     timeout_seconds: int = 10,
     downstream_url: str | None = None,
     bearer_token: str | None = None,
+    *,
+    raw_snapshot_writer: RawSnapshotWriter | None = None,
+    sqlite_write_enabled: bool = True,
 ) -> int:
     created, _blocks_found_by_channel = poll_channels_once_with_blocks(
         session,
@@ -215,6 +291,8 @@ def poll_channels_once(
         timeout_seconds=timeout_seconds,
         downstream_url=downstream_url,
         bearer_token=bearer_token,
+        raw_snapshot_writer=raw_snapshot_writer,
+        sqlite_write_enabled=sqlite_write_enabled,
     )
     return created
 
@@ -225,6 +303,9 @@ def poll_channels_once_with_blocks(
     timeout_seconds: int = 10,
     downstream_url: str | None = None,
     bearer_token: str | None = None,
+    *,
+    raw_snapshot_writer: RawSnapshotWriter | None = None,
+    sqlite_write_enabled: bool = True,
 ) -> tuple[int, dict[int, int]]:
     payload = fetch_channel_payload(
         api_url,
@@ -244,7 +325,15 @@ def poll_channels_once_with_blocks(
     blocks_found_by_channel = parse_blocks_found_by_channel(payload)
     if not snapshots:
         return 0, blocks_found_by_channel
-    return persist_channel_snapshots(session, snapshots), blocks_found_by_channel
+    return (
+        persist_channel_snapshots(
+            session,
+            snapshots,
+            raw_snapshot_writer=raw_snapshot_writer,
+            sqlite_write_enabled=sqlite_write_enabled,
+        ),
+        blocks_found_by_channel,
+    )
 
 
 def _parse_found_at(value: Any) -> datetime:

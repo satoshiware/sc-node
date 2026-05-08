@@ -31,9 +31,11 @@ from app.postgres_schema import (
     audit_events,
     block_rewards,
     blocks_found,
+    carry_state,
     metadata,
     miner_identities,
     miner_work_deltas,
+    payout_events,
     raw_miner_snapshots,
     service_cursors,
     settlement_blocks,
@@ -43,6 +45,7 @@ from app.postgres_schema import (
     settlement_user_work,
     settlement_windows,
     users,
+    work_accrual_bucket,
 )
 
 
@@ -291,6 +294,26 @@ class PostgresLedgerRepository:
             select(raw_miner_snapshots).where(raw_miner_snapshots.c.id == snapshot_id)
         )
 
+    def list_raw_miner_snapshot_counters_up_to(self, *, period_end: datetime) -> list[dict[str, Any]]:
+        _require_tzaware("period_end", period_end)
+        statement = (
+            select(
+                raw_miner_snapshots.c.identity,
+                raw_miner_snapshots.c.channel_id,
+                raw_miner_snapshots.c.accepted_shares_total,
+                raw_miner_snapshots.c.accepted_work_total,
+                raw_miner_snapshots.c.captured_at,
+            )
+            .where(raw_miner_snapshots.c.captured_at <= period_end)
+            .order_by(
+                raw_miner_snapshots.c.identity.asc(),
+                raw_miner_snapshots.c.channel_id.asc(),
+                raw_miner_snapshots.c.captured_at.asc(),
+                raw_miner_snapshots.c.id.asc(),
+            )
+        )
+        return self._select_all(statement)
+
     def create_miner_work_delta(
         self,
         *,
@@ -473,6 +496,7 @@ class PostgresLedgerRepository:
     def upsert_settlement_window(
         self,
         *,
+        sqlite_settlement_id: int | None = None,
         settlement_run_at: datetime,
         work_window_start: datetime,
         work_window_end: datetime,
@@ -491,6 +515,7 @@ class PostgresLedgerRepository:
         _require_tzaware("completed_at", completed_at)
         values = _clean_values(
             {
+                "sqlite_settlement_id": sqlite_settlement_id,
                 "status": status,
                 "settlement_run_at": settlement_run_at,
                 "work_window_start": work_window_start,
@@ -503,6 +528,18 @@ class PostgresLedgerRepository:
                 "completed_at": completed_at,
             }
         )
+        update_values: dict[str, Any] = {
+            "status": status,
+            "settlement_run_at": settlement_run_at,
+            "maturity_offset_minutes": maturity_offset_minutes,
+            "total_reward_sats": total_reward_sats,
+            "total_work": _as_decimal(total_work),
+            "total_shares": total_shares,
+            "completed_at": completed_at,
+        }
+        if sqlite_settlement_id is not None:
+            update_values["sqlite_settlement_id"] = sqlite_settlement_id
+
         statement = (
             pg_insert(settlement_windows)
             .values(**values)
@@ -511,15 +548,7 @@ class PostgresLedgerRepository:
                     settlement_windows.c.work_window_start,
                     settlement_windows.c.work_window_end,
                 ],
-                set_={
-                    "status": status,
-                    "settlement_run_at": settlement_run_at,
-                    "maturity_offset_minutes": maturity_offset_minutes,
-                    "total_reward_sats": total_reward_sats,
-                    "total_work": _as_decimal(total_work),
-                    "total_shares": total_shares,
-                    "completed_at": completed_at,
-                },
+                set_=update_values,
             )
             .returning(*settlement_windows.c)
         )
@@ -1126,3 +1155,156 @@ class PostgresLedgerRepository:
         return self._select_one_or_none(
             select(service_cursors).where(service_cursors.c.cursor_name == cursor_name)
         )
+
+    def upsert_carry_state(
+        self,
+        *,
+        bucket: str = "default",
+        carry_btc: Decimal | int | str,
+        updated_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        _require_tzaware("updated_at", updated_at)
+        effective_updated_at = updated_at or utcnow()
+        statement = (
+            pg_insert(carry_state)
+            .values(
+                bucket=bucket,
+                carry_btc=_as_decimal(carry_btc),
+                updated_at=effective_updated_at,
+            )
+            .on_conflict_do_update(
+                index_elements=[carry_state.c.bucket],
+                set_={
+                    "carry_btc": _as_decimal(carry_btc),
+                    "updated_at": effective_updated_at,
+                },
+            )
+            .returning(*carry_state.c)
+        )
+        return self._execute_returning_one(statement)
+
+    def get_carry_state(self, *, bucket: str = "default") -> dict[str, Any] | None:
+        return self._select_one_or_none(select(carry_state).where(carry_state.c.bucket == bucket))
+
+    def upsert_work_accrual_bucket(
+        self,
+        *,
+        user_id: int,
+        accumulated_work: Decimal | int | str,
+        updated_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        _require_tzaware("updated_at", updated_at)
+        effective_updated_at = updated_at or utcnow()
+        statement = (
+            pg_insert(work_accrual_bucket)
+            .values(
+                user_id=user_id,
+                accumulated_work=_as_decimal(accumulated_work),
+                updated_at=effective_updated_at,
+            )
+            .on_conflict_do_update(
+                index_elements=[work_accrual_bucket.c.user_id],
+                set_={
+                    "accumulated_work": _as_decimal(accumulated_work),
+                    "updated_at": effective_updated_at,
+                },
+            )
+            .returning(*work_accrual_bucket.c)
+        )
+        return self._execute_returning_one(statement)
+
+    def get_work_accrual_bucket(self, user_id: int) -> dict[str, Any] | None:
+        return self._select_one_or_none(
+            select(work_accrual_bucket).where(work_accrual_bucket.c.user_id == user_id)
+        )
+
+    def list_all_work_accrual_buckets(self) -> list[dict[str, Any]]:
+        return self._select_all(select(work_accrual_bucket).order_by(work_accrual_bucket.c.user_id.asc()))
+
+    def create_payout_event(
+        self,
+        *,
+        settlement_credit_id: int,
+        payload_json: str,
+        status: str = "pending",
+        created_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        _require_tzaware("created_at", created_at)
+        values = _clean_values(
+            {
+                "settlement_credit_id": settlement_credit_id,
+                "payload_json": payload_json,
+                "status": status,
+                "created_at": created_at,
+            }
+        )
+        statement = payout_events.insert().values(**values).returning(*payout_events.c)
+        return self._execute_returning_one(statement)
+
+    def get_payout_event_by_settlement_credit_id(self, settlement_credit_id: int) -> dict[str, Any] | None:
+        return self._select_one_or_none(
+            select(payout_events).where(payout_events.c.settlement_credit_id == settlement_credit_id)
+        )
+
+    def update_payout_event_status(
+        self,
+        settlement_credit_id: int,
+        status: str,
+    ) -> dict[str, Any] | None:
+        statement = (
+            payout_events
+            .update()
+            .where(payout_events.c.settlement_credit_id == settlement_credit_id)
+            .values(status=status)
+            .returning(*payout_events.c)
+        )
+        return self._execute_returning_one(statement)
+
+    def list_pending_payout_events(self) -> list[dict[str, Any]]:
+        return self._select_all(
+            select(
+                payout_events.c.id,
+                payout_events.c.settlement_credit_id,
+                payout_events.c.payload_json,
+                payout_events.c.status,
+                payout_events.c.created_at,
+                settlement_user_credits.c.user_id,
+                settlement_user_credits.c.settlement_id,
+                settlement_user_credits.c.amount_sats,
+                settlement_user_credits.c.idempotency_key,
+                users.c.username,
+                settlement_windows.c.work_window_start,
+                settlement_windows.c.work_window_end,
+            )
+            .select_from(
+                payout_events
+                .join(
+                    settlement_user_credits,
+                    settlement_user_credits.c.id == payout_events.c.settlement_credit_id,
+                )
+                .join(
+                    users,
+                    users.c.id == settlement_user_credits.c.user_id,
+                )
+                .join(
+                    settlement_windows,
+                    settlement_windows.c.id == settlement_user_credits.c.settlement_id,
+                )
+            )
+            .where(payout_events.c.status != "sent")
+            .order_by(payout_events.c.id.asc())
+        )
+
+    def update_settlement_credit_status(
+        self,
+        settlement_credit_id: int,
+        status: str,
+    ) -> dict[str, Any] | None:
+        statement = (
+            settlement_user_credits
+            .update()
+            .where(settlement_user_credits.c.id == settlement_credit_id)
+            .values(status=status)
+            .returning(*settlement_user_credits.c)
+        )
+        return self._execute_returning_one(statement)

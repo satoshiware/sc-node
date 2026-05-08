@@ -145,6 +145,12 @@ def _postgres_rows():
     ]
 
 
+def _postgres_rows_with_mapping(sqlite_settlement_id: int = 501):
+    rows = _postgres_rows()
+    rows[0]["sqlite_settlement_id"] = sqlite_settlement_id
+    return rows
+
+
 def _allow_candidate(monkeypatch, endpoints: str, *, require_match: bool = True) -> None:
     monkeypatch.setenv("POSTGRES_LEDGER_READS_ENABLED", "true")
     monkeypatch.setenv("POSTGRES_LEDGER_READ_MODE", "postgres_shadow_candidate")
@@ -240,7 +246,7 @@ def test_reads_enabled_allowed_candidate_mode_uses_sqlite_when_settlement_id_map
     )
     monkeypatch.setattr(
         "app.main._get_postgres_candidate_read_repository",
-        lambda: pytest.fail("Postgres repository should not be used without a public settlement id mapping"),
+        lambda: FakePostgresReadRepository(rows=_postgres_rows()),
     )
 
     response = TestClient(app).get(path)
@@ -263,7 +269,7 @@ def test_require_shadow_match_blocks_postgres_when_audit_is_not_matched(monkeypa
     _mock_shadow_audit(monkeypatch, "mismatched")
     monkeypatch.setattr(
         "app.main._get_postgres_candidate_read_repository",
-        lambda: pytest.fail("Postgres repository should not be used when audit gate blocks"),
+        lambda: FakePostgresReadRepository(rows=_postgres_rows_with_mapping(600)),
     )
 
     response = TestClient(app).get("/settlements/latest")
@@ -330,3 +336,44 @@ def test_mapping_unavailable_keeps_sqlite_even_when_fallback_disabled(monkeypatc
     assert "read_diagnostics" not in payload
     assert "supersecret" not in response.text
     assert "postgres://" not in response.text
+
+
+def test_candidate_history_uses_postgres_when_mapping_exists(monkeypatch, tmp_path) -> None:
+    _clear_postgres_read_env(monkeypatch)
+    _seed_sqlite(tmp_path, monkeypatch)
+    _allow_candidate(monkeypatch, "settlement_history", require_match=False)
+
+    monkeypatch.setattr(
+        "app.main._get_postgres_candidate_read_repository",
+        lambda: FakePostgresReadRepository(rows=_postgres_rows_with_mapping(777)),
+    )
+
+    response = TestClient(app).get("/audit/settlements?limit=5")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["settlements"][0]["settlement_id"] == 777
+    assert payload["settlements"][0]["raw"]["read_source"] == "postgres"
+    assert payload["settlements"][0]["raw"]["settlement_window_id"] == 900
+    assert payload["read_diagnostics"]["read_source"] == "postgres"
+    assert payload["read_diagnostics"]["postgres_read_endpoint"] == "settlement_history"
+
+
+def test_candidate_detail_uses_postgres_when_mapping_exists(monkeypatch, tmp_path) -> None:
+    _clear_postgres_read_env(monkeypatch)
+    _seed_sqlite(tmp_path, monkeypatch)
+    _allow_candidate(monkeypatch, "settlement_detail", require_match=False)
+
+    monkeypatch.setattr(
+        "app.main._get_postgres_candidate_read_repository",
+        lambda: FakePostgresReadRepository(rows=_postgres_rows_with_mapping(778)),
+    )
+
+    response = TestClient(app).get("/settlements/latest")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["settlement"]["settlement_id"] == 778
+    assert payload["users"][0]["username"] == "postgres-user"
+    assert payload["read_diagnostics"]["read_source"] == "postgres"
+    assert payload["read_diagnostics"]["postgres_read_endpoint"] == "settlement_detail"

@@ -7,6 +7,15 @@ from app.models import MetricSnapshot, SnapshotBlock
 from app.poller import poll_channels_once, poll_metrics_once, upsert_snapshot_blocks
 
 
+class _RawSnapshotWriter:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def create_raw_miner_snapshot(self, **kwargs):
+        self.calls.append(kwargs)
+        return {"id": len(self.calls)}
+
+
 class _Response:
     def __init__(self, text: str, status_code: int = 200):
         self.text = text
@@ -99,6 +108,57 @@ def test_poller_returns_zero_if_metric_missing(monkeypatch, session) -> None:
 
     created = poll_metrics_once(session, "http://127.0.0.1:9092/metrics")
     assert created == 0
+    assert session.query(MetricSnapshot).count() == 0
+
+
+def test_poll_metrics_once_dual_writes_raw_snapshots(monkeypatch, session) -> None:
+    payload = '\n'.join([
+        '# HELP sv2_server_shares_accepted_total ...',
+        'sv2_server_shares_accepted_total{channel_id="1",user_identity="baveet.miner1"} 21',
+        'sv2_server_shares_accepted_total{channel_id="2",user_identity="baveet.miner2"} 8',
+    ])
+
+    def _fake_get(_url: str, timeout: int):
+        _ = timeout
+        return _Response(payload)
+
+    monkeypatch.setattr("app.poller.requests.get", _fake_get)
+    writer = _RawSnapshotWriter()
+
+    created = poll_metrics_once(
+        session,
+        "http://127.0.0.1:9092/metrics",
+        raw_snapshot_writer=writer,
+    )
+
+    assert created == 2
+    assert len(writer.calls) == 2
+    assert {call["identity"] for call in writer.calls} == {"baveet.miner1", "baveet.miner2"}
+    assert {call["source"] for call in writer.calls} == {"translator_metrics"}
+
+
+def test_poll_metrics_once_can_skip_sqlite_writes(monkeypatch, session) -> None:
+    payload = '\n'.join([
+        '# HELP sv2_server_shares_accepted_total ...',
+        'sv2_server_shares_accepted_total{channel_id="1",user_identity="baveet.miner1"} 21',
+    ])
+
+    def _fake_get(_url: str, timeout: int):
+        _ = timeout
+        return _Response(payload)
+
+    monkeypatch.setattr("app.poller.requests.get", _fake_get)
+    writer = _RawSnapshotWriter()
+
+    created = poll_metrics_once(
+        session,
+        "http://127.0.0.1:9092/metrics",
+        raw_snapshot_writer=writer,
+        sqlite_write_enabled=False,
+    )
+
+    assert created == 1
+    assert len(writer.calls) == 1
     assert session.query(MetricSnapshot).count() == 0
 
 
@@ -227,6 +287,46 @@ def test_poll_channels_once_prefers_downstream_identity_by_channel(monkeypatch, 
         (2, "baveet.worker3"),
         (3, "Ben.Cust1"),
     ]
+
+
+def test_poll_channels_once_dual_writes_raw_snapshots(monkeypatch, session) -> None:
+    payload = {
+        "status": "ok",
+        "configured": True,
+        "data": {
+            "extended_channels": [
+                {
+                    "channel_id": 11,
+                    "user_identity": "alice.worker1",
+                    "shares_acknowledged": 15,
+                    "shares_rejected": 2,
+                    "share_work_sum": 64.25,
+                },
+            ],
+            "standard_channels": [],
+        },
+    }
+
+    def _fake_get(_url: str, timeout: int, headers=None):
+        _ = (timeout, headers)
+        return _JsonResponse(payload)
+
+    monkeypatch.setattr("app.poller.requests.get", _fake_get)
+    writer = _RawSnapshotWriter()
+
+    created = poll_channels_once(
+        session,
+        "http://127.0.0.1:8080/v1/translator/upstream/channels",
+        raw_snapshot_writer=writer,
+    )
+
+    assert created == 1
+    assert len(writer.calls) == 1
+    call = writer.calls[0]
+    assert call["identity"] == "alice.worker1"
+    assert call["channel_id"] == 11
+    assert float(call["accepted_work_total"]) == 64.25
+    assert call["source"] == "translator_channels"
 
 
 def test_upsert_snapshot_blocks_creates_rows_from_blocks_payload(session) -> None:

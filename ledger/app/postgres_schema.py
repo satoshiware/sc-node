@@ -156,6 +156,7 @@ settlement_windows = Table(
     "settlement_windows",
     metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("sqlite_settlement_id", BIGINT),
     Column("status", TEXT, nullable=False, server_default=text("'pending'")),
     Column("settlement_run_at", TIMESTAMP(timezone=True), nullable=False),
     Column("work_window_start", TIMESTAMP(timezone=True), nullable=False),
@@ -181,8 +182,10 @@ settlement_windows = Table(
     CheckConstraint("total_work >= 0", name="ck_settlement_windows_total_work_nonnegative"),
     CheckConstraint("total_shares >= 0", name="ck_settlement_windows_total_shares_nonnegative"),
     UniqueConstraint("work_window_start", "work_window_end", name="uq_settlement_windows_work_window"),
+    UniqueConstraint("sqlite_settlement_id", name="uq_settlement_windows_sqlite_settlement_id"),
 )
 Index("ix_settlement_windows_status", settlement_windows.c.status)
+Index("ix_settlement_windows_sqlite_settlement_id", settlement_windows.c.sqlite_settlement_id)
 
 summary_snapshot = Table(
     "summary_snapshot",
@@ -438,3 +441,69 @@ service_cursors = Table(
     Column("updated_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")),
     UniqueConstraint("cursor_name", name="uq_service_cursors_cursor_name"),
 )
+
+carry_state = Table(
+    "carry_state",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("bucket", TEXT, nullable=False),
+    Column("carry_btc", Numeric(18, 8), nullable=False, server_default=text("0")),
+    Column("updated_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")),
+    CheckConstraint("carry_btc >= 0", name="ck_carry_state_carry_btc_nonnegative"),
+    UniqueConstraint("bucket", name="uq_carry_state_bucket"),
+)
+
+work_accrual_bucket = Table(
+    "work_accrual_bucket",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column(
+        "user_id",
+        BIGINT,
+        ForeignKey("users.id", name="fk_work_accrual_bucket_user_id_users"),
+        nullable=False,
+    ),
+    Column("accumulated_work", Numeric(38, 16), nullable=False, server_default=text("0")),
+    Column("updated_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")),
+    CheckConstraint(
+        "accumulated_work >= 0",
+        name="ck_work_accrual_bucket_accumulated_work_nonnegative",
+    ),
+    UniqueConstraint("user_id", name="uq_work_accrual_bucket_user_id"),
+)
+Index("ix_work_accrual_bucket_updated_at", work_accrual_bucket.c.updated_at)
+
+payout_events = Table(
+    "payout_events",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column(
+        "settlement_credit_id",
+        BIGINT,
+        ForeignKey(
+            "settlement_user_credits.id",
+            name="fk_payout_events_settlement_credit_id_settlement_user_credits",
+        ),
+        nullable=False,
+    ),
+    Column("payload_json", JSONB, nullable=False),
+    Column("status", TEXT, nullable=False, server_default=text("'pending_sent'")),
+    Column("created_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")),
+    UniqueConstraint("settlement_credit_id", name="uq_payout_events_settlement_credit_id"),
+)
+Index("ix_payout_events_status", payout_events.c.status)
+
+block_counter_state = Table(
+    "block_counter_state",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("channel_id", BIGINT, nullable=False),
+    Column("last_blocks_found_total", BIGINT, nullable=False, server_default=text("0")),
+    Column("updated_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")),
+    CheckConstraint(
+        "last_blocks_found_total >= 0",
+        name="ck_block_counter_state_last_blocks_found_total_nonnegative",
+    ),
+    UniqueConstraint("channel_id", name="uq_block_counter_state_channel_id"),
+)
+Index("ix_block_counter_state_updated_at", block_counter_state.c.updated_at)

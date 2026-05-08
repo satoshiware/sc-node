@@ -149,3 +149,49 @@ Write a bounded range only when you explicitly want inserts/upserts:
 POSTGRES_LEDGER_DATABASE_URL=postgresql+psycopg://azledger:azledger_dev_password@localhost:5432/azcoin_ledger_dev \
 python scripts/backfill_postgres_shadow.py --start-id 40 --end-id 49 --write
 ```
+
+## Step 7 Candidate Read Cutover
+
+After sqlite_settlement_id backfill is complete and shadow parity is clean, enable Postgres candidate reads for public settlement endpoints:
+
+```bash
+POSTGRES_LEDGER_READS_ENABLED=true
+POSTGRES_LEDGER_READ_MODE=postgres_shadow_candidate
+POSTGRES_LEDGER_READ_ALLOWED_ENDPOINTS=settlement_history,settlement_detail
+POSTGRES_LEDGER_READ_REQUIRE_SHADOW_MATCH=true
+POSTGRES_LEDGER_READ_FALLBACK_TO_SQLITE=true
+```
+
+These settings keep SQLite fallback active while candidate reads are validated in production.
+
+## Step 8 Primary Session Cutover
+
+After candidate reads are stable, switch the app session source to Postgres:
+
+```bash
+POSTGRES_PRIMARY_SESSION_ENABLED=true
+POSTGRES_PRIMARY_SESSION_FALLBACK_TO_SQLITE=true
+```
+
+For strict mode (fail fast if Postgres is unavailable):
+
+```bash
+POSTGRES_PRIMARY_SESSION_ENABLED=true
+POSTGRES_PRIMARY_SESSION_FALLBACK_TO_SQLITE=false
+```
+
+## Step 9 SQLite Retirement Mode
+
+After parity is stable over multiple cycles, disable SQLite runtime writes and fallbacks:
+
+```bash
+SQLITE_RETIREMENT_MODE_ENABLED=true
+SQLITE_RUNTIME_WRITES_ENABLED=false
+POSTGRES_PRIMARY_SESSION_ENABLED=true
+POSTGRES_PRIMARY_SESSION_FALLBACK_TO_SQLITE=false
+POSTGRES_SETTLEMENT_ENGINE_ENABLED=true
+POSTGRES_SENDER_ENABLED=true
+POSTGRES_LEDGER_READ_FALLBACK_TO_SQLITE=false
+```
+
+When retirement mode is enabled, the service enforces these prerequisites and fails fast if they are not satisfied.
