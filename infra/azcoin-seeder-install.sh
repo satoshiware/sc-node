@@ -402,11 +402,6 @@ EOF2
 fi
 log "Created README at /usr/local/share/doc/azcoin.txt"
 
-# Create symlink to README in azcoin user's home directory
-ln -sfn /usr/local/share/doc/azcoin.txt /home/azcoin/readme.txt
-chown -h azcoin:azcoin /home/azcoin/readme.txt
-log "Created symlink: /home/azcoin/readme.txt"
-
 log "AZCoin Seeder Node installation completed successfully!"
 log "Review the log: ${LOG_FILE}"
 
