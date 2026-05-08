@@ -233,10 +233,8 @@ walletnotify=/usr/local/bin/azcoin_wallet_event_append.sh %s %w
 rpcwhitelist=coinbase: \
     getnewaddress, \
     getaddressinfo, \
-    listunspent, \
-    gettxout, \
-    getwalletinfo, \
-    getbalances, \
+    deriveaddresses, \
+    getreceivedbyaddress, \
     getblockchaininfo
 EOF
 

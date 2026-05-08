@@ -63,24 +63,25 @@ log "=== End of Environment File ==="
 # ===================== ENVIRONMENT VALIDATION =====================
 log "=== Validating Environment Variables ==="
 
-[[ -n "${AZCOIN_TARBALL_URL}" ]]              || { log "ERROR: AZCOIN_TARBALL_URL is missing"; exit 1; }
-[[ -n "${AZCOIN_TARBALL_SHA256}" ]]          || { log "ERROR: AZCOIN_TARBALL_SHA256 is missing"; exit 1; }
-[[ -n "${TEMPLATE_PROVIDER_TARBALL_URL}" ]]  || { log "ERROR: TEMPLATE_PROVIDER_TARBALL_URL is missing"; exit 1; }
-[[ -n "${TEMPLATE_PROVIDER_TARBALL_SHA256}" ]] || { log "ERROR: TEMPLATE_PROVIDER_TARBALL_SHA256 is missing"; exit 1; }
-[[ -n "${PAYOUT_ENGINE_TARBALL_URL}" ]]      || { log "ERROR: PAYOUT_ENGINE_TARBALL_URL is missing"; exit 1; }
-[[ -n "${PAYOUT_ENGINE_TARBALL_SHA256}" ]]   || { log "ERROR: PAYOUT_ENGINE_TARBALL_SHA256 is missing"; exit 1; }
-[[ -n "${WG_PORT}" ]]                        || { log "ERROR: WG_PORT is missing"; exit 1; }
-[[ -n "${AZCOIN_P2P_PORT}" ]]                || { log "ERROR: AZCOIN_P2P_PORT is missing"; exit 1; }
-[[ -n "${AZCOIN_IP_UPDATER_CRON_ENABLE}" ]]  || { log "ERROR: AZCOIN_IP_UPDATER_CRON_ENABLE is missing"; exit 1; }
-[[ -n "${AZCOIN_SEEDNODE_DNS}" ]]            || { log "ERROR: AZCOIN_SEEDNODE_DNS is missing"; exit 1; }
-[[ -n "${SATOSHI_FIDO2_KEY1}" ]]             || { log "ERROR: SATOSHI_FIDO2_KEY1 (primary) is required"; exit 1; }
-[[ -n "${AZPOOL_HOSTNAME}" ]]                || { log "ERROR: AZPOOL_HOSTNAME is required"; exit 1; }
+[[ -n "${AZCOIN_TARBALL_URL}" ]]                || { log "ERROR: AZCOIN_TARBALL_URL is missing"; exit 1; }
+[[ -n "${AZCOIN_TARBALL_SHA256}" ]]             || { log "ERROR: AZCOIN_TARBALL_SHA256 is missing"; exit 1; }
+[[ -n "${TEMPLATE_PROVIDER_TARBALL_URL}" ]]     || { log "ERROR: TEMPLATE_PROVIDER_TARBALL_URL is missing"; exit 1; }
+[[ -n "${TEMPLATE_PROVIDER_TARBALL_SHA256}" ]]  || { log "ERROR: TEMPLATE_PROVIDER_TARBALL_SHA256 is missing"; exit 1; }
+[[ -n "${PAYOUT_ENGINE_TARBALL_URL}" ]]         || { log "ERROR: PAYOUT_ENGINE_TARBALL_URL is missing"; exit 1; }
+[[ -n "${PAYOUT_ENGINE_TARBALL_SHA256}" ]]      || { log "ERROR: PAYOUT_ENGINE_TARBALL_SHA256 is missing"; exit 1; }
+[[ -n "${WG_PORT}" ]]                           || { log "ERROR: WG_PORT is missing"; exit 1; }
+[[ -n "${AZCOIN_P2P_PORT}" ]]                   || { log "ERROR: AZCOIN_P2P_PORT is missing"; exit 1; }
+[[ -n "${AZCOIN_IP_UPDATER_CRON_ENABLE}" ]]     || { log "ERROR: AZCOIN_IP_UPDATER_CRON_ENABLE is missing"; exit 1; }
+[[ -n "${AZCOIN_SEEDNODE_DNS}" ]]               || { log "ERROR: AZCOIN_SEEDNODE_DNS is missing"; exit 1; }
+[[ -n "${SATOSHI_FIDO2_KEY1}" ]]                || { log "ERROR: SATOSHI_FIDO2_KEY1 (primary) is required"; exit 1; }
+[[ -n "${AZPOOL_HOSTNAME}" ]]                   || { log "ERROR: AZPOOL_HOSTNAME is required"; exit 1; }
 
 # Number checks
-[[ "${AZCOIN_DBCACHE}" =~ ^[0-9]+$ ]]      || { log "ERROR: AZCOIN_DBCACHE must be a number"; exit 1; }
-[[ "${AZCOIN_MAXMEMPOOL}" =~ ^[0-9]+$ ]]   || { log "ERROR: AZCOIN_MAXMEMPOOL must be a number"; exit 1; }
-[[ "${AZCOIN_P2P_PORT}" =~ ^[0-9]+$ ]]     || { log "ERROR: AZCOIN_P2P_PORT must be a number"; exit 1; }
-[[ "${WG_PORT}" =~ ^[0-9]+$ ]]             || { log "ERROR: WG_PORT must be a number"; exit 1; }
+[[ "${AZCOIN_DBCACHE}" =~ ^[0-9]+$ ]]           || { log "ERROR: AZCOIN_DBCACHE must be a number"; exit 1; }
+[[ "${AZCOIN_MAXMEMPOOL}" =~ ^[0-9]+$ ]]        || { log "ERROR: AZCOIN_MAXMEMPOOL must be a number"; exit 1; }
+[[ "${AZCOIN_P2P_PORT}" =~ ^[0-9]+$ ]]          || { log "ERROR: AZCOIN_P2P_PORT must be a number"; exit 1; }
+[[ "${TEMPLATE_PROVIDER_PORT}" =~ ^[0-9]+$ ]]   || { log "ERROR: TEMPLATE_PROVIDER_PORT must be a number"; exit 1; }
+[[ "${WG_PORT}" =~ ^[0-9]+$ ]]                  || { log "ERROR: WG_PORT must be a number"; exit 1; }
 
 # URL checks
 for url_var in AZCOIN_TARBALL_URL TEMPLATE_PROVIDER_TARBALL_URL PAYOUT_ENGINE_TARBALL_URL; do
@@ -253,10 +254,11 @@ log "=== Configuring UFW Firewall ==="
 ufw default deny incoming
 ufw default allow outgoing
 ufw allow 22/tcp comment "SSH"
-ufw allow "${AZCOIN_P2P_PORT}/tcp" comment "AZCoin P2P"
 ufw allow "${WG_PORT}/udp" comment "WireGuard"
+ufw allow "${AZCOIN_P2P_PORT}/tcp" comment "AZCoin P2P"
+ufw allow "${TEMPLATE_PROVIDER_PORT}/tcp" comment "Template Provider"
 ufw --force enable
-log "UFW enabled (SSH + AZCoin P2P + WireGuard)."
+log "UFW enabled (SSH + AZCoin P2P + WireGuard + Template Provider)."
 
 # ===================== WIREGUARD =====================
 log "=== Setting up WireGuard Server ==="
@@ -414,7 +416,7 @@ log "=== Installing AZCoin Node ==="
     "${AZCOIN_IP_UPDATER_CRON_ENABLE}"
 
 log "=== Installing Templar (SV2 Template Provider) ==="
-./templar-install.sh "${AZPOOL_BASE_DIR}/template-provider.tar"
+./templar-install.sh "${AZPOOL_BASE_DIR}/template-provider.tar" "${TEMPLATE_PROVIDER_PORT}"
 
 log "=== Installing Payouts Engine ==="
 ./payouts-install.azpool.sh "${AZPOOL_BASE_DIR}/payout-engine.tar"
