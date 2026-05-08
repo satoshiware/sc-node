@@ -35,26 +35,14 @@ set -euo pipefail
 # Seeder / Trusted Nodes:
 #   Unlike Bitcoin, AZCoin has no built-in DNS seed nodes. A fresh AZCoin node
 #   will remain isolated and unable to find peers unless it is given at least one
-#   reliable node to connect to via the addnode= parameter in azcoin.conf.
+#   reliable node to connect to via the seednode= parameter in azcoin.conf.
 #
 #   Organizations or entities deploying AZCoin nodes will need to provide dedicated
 #   "seeder nodes" with good uptime and connectivity. These seeder nodes serve as
-#   bootstrap points so new SC Nodes can connect and then gossip to discover the rest
-#   of the network.
+#   bootstrap points so new SC Nodes can connect and discover the rest of the network.
 #
 #   The seed node can be added manually, or (recommended) by running a
 #   follow-up configuration script.
-#
-# Recommended ratio: One dedicated seeder node for every 500 SC Nodes.
-#   Start with 1:500 and adjust based on sync performance and network load.
-#
-# The companion seeder node installation script is located at:
-#   sc-node/azcoin-seeder-install.sh
-#
-# Important Note for Seeder Nodes:
-#   Be sure to configure each seeder node to connect with several other prominent
-#   and well-established AZCoin nodes using the addnode= parameter in azcoin.conf to
-#   help ensure all nodes remain well-connected.
 #
 # IBD Acceleration:
 #   bitcoin.conf options: blocksonly=1, higher dbcache, and local connect
@@ -278,9 +266,9 @@ externalip=123.45.67.89
 # UPDATE PORT
 port=19333
 
-# Force persistent outbound connection to specific trusted peer(s)
-# UPDATE ADDNODE
-addnode=azcoin-seed.example.com
+# Use seeder for initial bootstrap (one-shot getaddr, then disconnect)
+# UPDATE SEEDNODE
+seednode=azcoin-seed.example.com
 
 # Control network/internet traffic during IBD
 # Overrides addnode parameter; disabled all other p2p connections.
@@ -291,7 +279,7 @@ addnode=azcoin-seed.example.com
 wallet=wallet
 
 # Walletnotify: trigger script on tx events (unconf, conf, sends, RBF)
-# Logs to wallet_events.log in home dir
+# Logs to /var/log/azcoin/wallet_events.log
 walletnotify=/usr/local/bin/azcoin_wallet_event_append.sh %s %w
 
 # assumevalid: default enabled - uses built-in checkpoint
@@ -321,15 +309,15 @@ fi
 
 # ===================== WALLET NOTIFY SCRIPT =====================
 log "Creating walletnotify script..."
-cat > /usr/local/bin/azcoin_wallet_event_append.sh << EOF
+cat > /usr/local/bin/azcoin_wallet_event_append.sh << 'EOF'
 #!/usr/bin/env bash
 # azcoin_wallet_event_append.sh - Append-only logger for walletnotify
 
-TIMESTAMP=\$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-TXID="\$1"
-WALLET="\$2"
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+TXID="$1"
+WALLET="$2"
 
-echo "\${TIMESTAMP} | \${TXID} | \${WALLET}" >> /var/log/azcoin/wallet_events.log
+echo "${TIMESTAMP} | ${TXID} | ${WALLET}" >> /var/log/azcoin/wallet_events.log
 
 exit 0
 EOF
@@ -500,7 +488,7 @@ cat > "${README_FILE}" << EOF
 ## Key Configuration Settings:
   - externalip: Make sure it matches the IP of the backend server
   - port: Must match the assigned port from the backend server
-  - addnode: Backend server seednode for AZCoin
+  - seednode: Backend server seednode for AZCoin
 
 ## Management
 - Start/Stop: sudo systemctl start/stop azcoind
