@@ -224,7 +224,7 @@ def test_shadow_write_disabled_does_not_require_postgres(monkeypatch, tmp_path) 
     monkeypatch.setenv("DRY_RUN", "true")
     monkeypatch.delenv("POSTGRES_LEDGER_SHADOW_WRITE_ENABLED", raising=False)
     monkeypatch.delenv("TRANSLATOR_CHANNELS_URL", raising=False)
-    monkeypatch.setattr("app.main.poll_metrics_once", lambda session, api_url: 0)
+    monkeypatch.setattr("app.main.poll_metrics_once", lambda session, api_url, **kwargs: 0)
     monkeypatch.setattr(
         "app.main.run_settlement",
         lambda session, now, interval_minutes, payout_decimals, reward_fetcher=None, **kwargs: SettlementResult(
@@ -313,7 +313,7 @@ def test_shadow_write_enabled_runs_after_sqlite_settlement_and_stays_idempotent(
     monkeypatch.setenv("DRY_RUN", "true")
     monkeypatch.delenv("TRANSLATOR_CHANNELS_URL", raising=False)
     monkeypatch.setattr("app.main.datetime", _FixedDateTime)
-    monkeypatch.setattr("app.main.poll_metrics_once", lambda session, api_url: 0)
+    monkeypatch.setattr("app.main.poll_metrics_once", lambda session, api_url, **kwargs: 0)
     monkeypatch.setattr("app.main.run_settlement", _run_sqlite_settlement)
     monkeypatch.setattr(
         "app.main.process_payout_events",
@@ -392,7 +392,7 @@ def test_shadow_write_compaction_runs_for_deferred_settlement(monkeypatch, tmp_p
     monkeypatch.setenv("DRY_RUN", "true")
     monkeypatch.delenv("TRANSLATOR_CHANNELS_URL", raising=False)
     monkeypatch.setattr("app.main.datetime", _FixedDateTime)
-    monkeypatch.setattr("app.main.poll_metrics_once", lambda session, api_url: 0)
+    monkeypatch.setattr("app.main.poll_metrics_once", lambda session, api_url, **kwargs: 0)
     monkeypatch.setattr(
         "app.main.run_settlement",
         lambda session, now, interval_minutes, payout_decimals, reward_fetcher=None, **kwargs: SettlementResult(

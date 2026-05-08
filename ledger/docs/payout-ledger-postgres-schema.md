@@ -120,7 +120,7 @@ This migration does not change payout runtime logic. It does not implement:
 - direct on-chain payout execution per miner
 - settlement retry orchestration
 - quarantining/blocking unmapped miner identities in runtime
-- compaction jobs or retention workers
+- standalone/background compaction workers (inline post-settlement compaction is implemented)
 - backfill from the existing SQLite prototype
 - replacement of the current SQLite prototype API/runtime models
 
