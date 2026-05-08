@@ -180,7 +180,7 @@ port=8333
 # Automatically updated via azcoin-externalip-updater.sh + cron
 # If this node is the terminating public static IP (not behind NAT), disable (recommended) the updater with: btc-externalip-updater.sh --disable
 # If behind NAT, but the external IP is static, you may optionally disable the updater
-externalip=CHANGEME
+externalip=PLACEHOLDER
 EOF
 
     chown bitcoin:bitcoin /etc/bitcoin/bitcoin.conf
@@ -271,7 +271,6 @@ fi
 # ===================== INSTALL EXTERNAL IP UPDATER =====================
 log "Installing btc-externalip-updater script..."
 
-# Create the updater script
 cat > /usr/local/bin/btc-externalip-updater.sh << 'EOF'
 #!/bin/bash
 # btc-externalip-updater.sh - Bitcoin Feeder external IP updater
@@ -284,8 +283,6 @@ fi
 CONFIG_FILE="/etc/bitcoin/bitcoin.conf"
 LOG_FILE="/var/log/bitcoin/externalip-updater.log"
 SERVICE_NAME="bitcoind"
-
-PLACEHOLDER="CHANGEME" # Placeholder value replaced by updater on first run
 
 # ===================== CRON MANAGEMENT =====================
 if [[ "$1" == "--enable" ]]; then
@@ -358,14 +355,13 @@ if [[ "$CURRENT_IP" != "$CONFIG_IP" ]]; then
     log "IP changed. Updating bitcoin.conf..."
 
     # Remove old externalip line and add the new one (no backup)
-    sed -i '/^externalip=/d' "$CONFIG_FILE"
-    echo "externalip=$CURRENT_IP" >> "$CONFIG_FILE"
+    sed -i "s/^externalip=.*/externalip=$CURRENT_IP/" "$CONFIG_FILE"
 
     log "Updated externalip=$CURRENT_IP"
 
-    # Skip restart if we just replaced the placeholder on first install
-    if [[ "$CONFIG_IP" == "$PLACEHOLDER" ]]; then
-        log "Placeholder (CHANGEME) replaced - skipping bitcoind restart on initial setup."
+    # Skip restart if we just replaced the "PLACEHOLDER" on first install
+    if [[ "$CONFIG_IP" == "PLACEHOLDER" ]]; then
+        log "\"PLACEHOLDER\" replaced - skipping bitcoind restart on initial setup."
     else
         log "Restarting $SERVICE_NAME..."
         systemctl restart "$SERVICE_NAME"
