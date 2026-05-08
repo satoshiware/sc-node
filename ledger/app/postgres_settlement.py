@@ -219,10 +219,7 @@ def run_settlement_postgres(
     decimals = payout_decimals or settings.payout_decimals
     now_aware = _as_utc_aware(now)
 
-    latest_settlement = repository.get_settlement_window_by_range(
-        work_window_start=None,
-        work_window_end=None,
-    )
+    latest_settlement = repository.get_latest_settlement_window()
 
     period_end = now
     if latest_settlement is None:
@@ -243,9 +240,6 @@ def run_settlement_postgres(
                 carry_btc=Decimal(str(carry.get("carry_btc") or 0)),
             )
         period_start = latest_settlement["work_window_end"]
-        capped_start = period_end - timedelta(minutes=interval)
-        if period_start < capped_start:
-            period_start = capped_start
 
     existing_settlement = repository.get_settlement_window_by_range(
         work_window_start=_as_utc_aware(period_start),

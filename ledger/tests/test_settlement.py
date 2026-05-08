@@ -253,6 +253,40 @@ def test_run_settlement_uses_contiguous_non_overlapping_periods(session) -> None
     assert second.period_end == second_now
 
 
+def test_run_settlement_with_lag_keeps_contiguous_windows(session) -> None:
+    first_now = datetime(2026, 1, 1, 5, 0, 0)
+    # Deliberately later than interval_minutes to simulate scheduler lag.
+    second_now = first_now + timedelta(minutes=12)
+
+    _add_snapshot(session, "alice.m1", 10, first_now - timedelta(minutes=6), work_total=100)
+    _add_snapshot(session, "alice.m1", 20, first_now - timedelta(minutes=1), work_total=130)
+    _add_snapshot(session, "alice.m1", 24, second_now - timedelta(minutes=1), work_total=150)
+    session.commit()
+
+    def _reward_fetcher(period_start, period_end):
+        _ = (period_start, period_end)
+        return 0.01000000
+
+    first = run_settlement(
+        session,
+        first_now,
+        interval_minutes=5,
+        payout_decimals=8,
+        reward_fetcher=_reward_fetcher,
+    )
+    second = run_settlement(
+        session,
+        second_now,
+        interval_minutes=5,
+        payout_decimals=8,
+        reward_fetcher=_reward_fetcher,
+    )
+
+    assert first.period_end == first_now
+    assert second.period_start == first.period_end
+    assert second.period_end == second_now
+
+
 # ---------------------------------------------------------------------------
 # Golden tests: Phase 3 deferred accrual behavior
 # ---------------------------------------------------------------------------

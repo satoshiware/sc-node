@@ -102,3 +102,118 @@ class TestPostgresSettlementBasics:
         """Verify postgres_settlement module can be imported."""
         from app.postgres_settlement import run_settlement_postgres
         assert callable(run_settlement_postgres)
+
+    def test_next_window_uses_previous_end_as_baseline(self):
+        """Ensure consecutive settlements chain windows without resetting baseline."""
+
+        class _FakeRepo:
+            def __init__(self, latest_end):
+                self.latest_end = latest_end
+                self.range_calls = []
+
+            def get_latest_settlement_window(self):
+                return {
+                    "id": 100,
+                    "status": "completed",
+                    "work_window_start": self.latest_end - timedelta(minutes=10),
+                    "work_window_end": self.latest_end,
+                    "total_shares": 10,
+                    "total_work": Decimal("100"),
+                    "total_reward_sats": 1000,
+                    "sqlite_settlement_id": None,
+                }
+
+            def get_settlement_window_by_range(self, *, work_window_start, work_window_end):
+                self.range_calls.append((work_window_start, work_window_end))
+                return {
+                    "id": 101,
+                    "status": "completed",
+                    "work_window_start": work_window_start,
+                    "work_window_end": work_window_end,
+                    "total_shares": 5,
+                    "total_work": Decimal("50"),
+                    "total_reward_sats": 500,
+                    "sqlite_settlement_id": None,
+                }
+
+            def list_settlement_user_credits_with_users(self, _settlement_id):
+                return []
+
+            def get_carry_state(self, *, bucket="default"):
+                return {"bucket": bucket, "carry_btc": Decimal("0")}
+
+        latest_end = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 12, 5, tzinfo=UTC)
+        repo = _FakeRepo(latest_end)
+
+        result = run_settlement_postgres(
+            repo,
+            now,
+            interval_minutes=10,
+            payout_decimals=8,
+        )
+
+        assert len(repo.range_calls) == 1
+        called_start, called_end = repo.range_calls[0]
+        assert called_start == latest_end
+        assert called_end == now
+        assert result.period_start == latest_end
+        assert result.period_end == now
+
+    def test_next_window_with_lag_still_starts_from_previous_end(self):
+        """Ensure scheduler lag does not create a sliding overlapping contribution window."""
+
+        class _FakeRepo:
+            def __init__(self, latest_end):
+                self.latest_end = latest_end
+                self.range_calls = []
+
+            def get_latest_settlement_window(self):
+                return {
+                    "id": 200,
+                    "status": "completed",
+                    "work_window_start": self.latest_end - timedelta(minutes=10),
+                    "work_window_end": self.latest_end,
+                    "total_shares": 10,
+                    "total_work": Decimal("100"),
+                    "total_reward_sats": 1000,
+                    "sqlite_settlement_id": None,
+                }
+
+            def get_settlement_window_by_range(self, *, work_window_start, work_window_end):
+                self.range_calls.append((work_window_start, work_window_end))
+                return {
+                    "id": 201,
+                    "status": "completed",
+                    "work_window_start": work_window_start,
+                    "work_window_end": work_window_end,
+                    "total_shares": 5,
+                    "total_work": Decimal("50"),
+                    "total_reward_sats": 500,
+                    "sqlite_settlement_id": None,
+                }
+
+            def list_settlement_user_credits_with_users(self, _settlement_id):
+                return []
+
+            def get_carry_state(self, *, bucket="default"):
+                return {"bucket": bucket, "carry_btc": Decimal("0")}
+
+        latest_end = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+        # Deliberately later than interval to emulate scheduler drift.
+        now = datetime(2026, 1, 1, 12, 12, tzinfo=UTC)
+        repo = _FakeRepo(latest_end)
+
+        result = run_settlement_postgres(
+            repo,
+            now,
+            interval_minutes=10,
+            payout_decimals=8,
+        )
+
+        assert len(repo.range_calls) == 1
+        called_start, called_end = repo.range_calls[0]
+        assert called_start == latest_end
+        assert called_end == now
+        assert result.period_start == latest_end
+        assert result.period_end == now

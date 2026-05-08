@@ -260,11 +260,6 @@ def run_settlement(
         if period_end <= latest_settlement.period_end:
             return _result_from_existing_settlement(session, latest_settlement)
         period_start = latest_settlement.period_end
-        # Cap the settlement window to at most interval_minutes to prevent
-        # scheduler jitter from accumulating a larger-than-T contribution window.
-        capped_start = period_end - timedelta(minutes=interval)
-        if period_start < capped_start:
-            period_start = capped_start
 
     existing_settlement = session.execute(
         select(Settlement).where(

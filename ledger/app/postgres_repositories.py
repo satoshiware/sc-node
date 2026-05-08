@@ -559,6 +559,13 @@ class PostgresLedgerRepository:
             select(settlement_windows).where(settlement_windows.c.id == settlement_id)
         )
 
+    def get_latest_settlement_window(self) -> dict[str, Any] | None:
+        return self._select_one_or_none(
+            select(settlement_windows)
+            .order_by(settlement_windows.c.work_window_end.desc(), settlement_windows.c.id.desc())
+            .limit(1)
+        )
+
     def get_settlement_window_by_range(
         self,
         *,
