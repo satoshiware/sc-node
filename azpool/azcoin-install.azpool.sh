@@ -45,10 +45,6 @@ log() {
     echo "$*" | tee -a "$LOG_FILE"
 }
 
-# Runtime / credential files (generated during setup)
-RPC_PASSWORD_DIR="/home/azcoin"
-RPC_PASSWORD_FILE="${RPC_PASSWORD_DIR}/rpcpassword"
-
 log "Starting AZCoin Mining Pool Backend Installation: $(date)"
 
 # ===================== ROOT CHECK =====================
@@ -164,21 +160,24 @@ if [[ ! -f /etc/azcoin/azcoin.conf ]]; then
     COINBASE_RPCAUTH=$(echo "$COINBASE_RPCAUTH_OUTPUT" | grep -o '^rpcauth=.*')
     COINBASE_PASSWORD=$(echo "$COINBASE_RPCAUTH_OUTPUT" | tail -n 1 | tr -d '\r\n \t')
 
-    if [[ -z "$COINBASE_RPCAUTH" || -z "$COINBASE_PASSWORD" ]]; then
-        log "ERROR: Failed to parse rpcauth.py output for coinbase - cannot continue"
-        log "Full output from rpcauth.py:"
-        log "$RPCAUTH_OUTPUT"
-        exit 1
+    log "Generating RPC credentials for templar (limited access)..."
+    TEMPLAR_RPCAUTH_OUTPUT=$(python3 /usr/local/bin/rpcauth.py templar 2>&1)
+    TEMPLAR_RPCAUTH=$(echo "$TEMPLAR_RPCAUTH_OUTPUT" | grep -o '^rpcauth=.*')
+    TEMPLAR_PASSWORD=$(echo "$TEMPLAR_RPCAUTH_OUTPUT" | tail -n 1 | tr -d '\r\n \t')
+
+    # Minimal safety check
+    if [[ -z "$COINBASE_RPCAUTH" || -z "$COINBASE_PASSWORD" || -z "$TEMPLAR_RPCAUTH" || -z "$TEMPLAR_PASSWORD" ]]; then
+        log "ERROR: Failed to generate RPC credentials"; exit 1
     fi
-    log "rpcauth.py generated successfully for coinbase: $RPCAUTH"
 
     umask 077 # umask 077 → new files get 0600 (rw-------), dirs 0700 (rwx------)
-    echo "${RPC_PASSWORD}" > "${RPC_PASSWORD_FILE}"
-    echo "${COINBASE_PASSWORD}" > "${RPC_PASSWORD_DIR}/coinbase-rpcpassword"
+    echo "${RPC_PASSWORD}" > "/home/azcoin/rpcpassword"
+    echo "${COINBASE_PASSWORD}" > "/home/azcoin/coinbase-rpcpassword"
+    echo "${TEMPLAR_PASSWORD}" > "/home/azcoin/templar-rpcpassword"
     umask 0022 # Restore standard umask (files 0644, dirs 0755)
 
-    chown azcoin:azcoin "${RPC_PASSWORD_FILE}" "${RPC_PASSWORD_DIR}/coinbase-rpcpassword"
-    chmod 640 "${RPC_PASSWORD_FILE}" "${RPC_PASSWORD_DIR}/coinbase-rpcpassword"
+    chown azcoin:azcoin "/home/azcoin/rpcpassword" "/home/azcoin/coinbase-rpcpassword" "/home/azcoin/templar-rpcpassword"
+    chmod 640 "/home/azcoin/rpcpassword" "/home/azcoin/coinbase-rpcpassword" "/home/azcoin/templar-rpcpassword"
     log "RPC passwords saved (640 perms)"
 
     log "Creating configuration directory: /etc/azcoin"
@@ -209,6 +208,9 @@ ${RPCAUTH}
 # Restricted user for az-coinbase-updater and frontend (address generation + spent checks)
 ${COINBASE_RPCAUTH}
 
+# Restricted user for templar (mining pool template provider)
+${TEMPLAR_RPCAUTH}
+
 # Will be automatically updated by externalip-updater.sh
 externalip=PLACEHOLDER
 
@@ -218,9 +220,10 @@ port=${PORT}
 # Used for initial bootstrap and peer discovery
 seednode=${SEEDNODE}
 
-# ZMQ Notifications (for pool software)
-zmqpubrawtx=tcp://127.0.0.1:29333
-zmqpubhashblock=tcp://127.0.0.1:29334
+# ZMQ Notifications (for Template Provider)
+zmqpubhashblock=tcp://127.0.0.1:29332
+zmqpubrawtx=tcp://127.0.0.1:29335
+zmqpubsequence=tcp://127.0.0.1:29336
 
 # Named wallet that will be auto-loaded
 wallet=wallet
@@ -236,6 +239,14 @@ rpcwhitelist=coinbase: \
     deriveaddresses, \
     getreceivedbyaddress, \
     getblockchaininfo
+
+# Templar whitelist (strictly limited)
+rpcwhitelist=templar: \
+    getblockchaininfo, \
+    getblocktemplate, \
+    submitblock, \
+    getbesthash, \
+    getblockheader
 EOF
 
     chown azcoin:azcoin /etc/azcoin/azcoin.conf
