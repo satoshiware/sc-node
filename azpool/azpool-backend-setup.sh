@@ -103,6 +103,15 @@ done
 
 log "Environment validation passed."
 
+# ===================== PYTHON CHECK =====================
+log "=== Checking for Python 3 ==="
+if ! command -v python3 &> /dev/null; then
+    log "ERROR: python3 is required but not found on the system"
+    log "Please install it with: apt-get install -y python3"
+    exit 1
+fi
+log "✓ Python 3 detected"
+
 # ===================== SCRIPT PRESENCE VERIFICATION + PERMISSIONS =====================
 log "=== Verifying Required Installer Scripts ==="
 
@@ -157,7 +166,7 @@ download_and_verify "$PAYOUT_ENGINE_TARBALL_URL" "payout-engine.tar" "$PAYOUT_EN
 # ===================== SYSTEM UPDATE =====================
 log "=== System Update & Base Packages ==="
 apt-get update -qq
-apt-get install -y curl ufw wireguard wireguard-tools openssh-server
+apt-get install -y curl ufw wireguard wireguard-tools openssh-server python-is-python3
 apt-get full-upgrade -y
 apt-get autoremove -y
 apt-get autoclean -y
