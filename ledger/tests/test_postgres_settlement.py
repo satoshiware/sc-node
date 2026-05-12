@@ -105,7 +105,7 @@ class TestPostgresSettlementBasics:
         assert callable(run_settlement_postgres)
 
     def test_next_window_uses_previous_end_as_baseline(self):
-        """Ensure consecutive settlements chain windows without resetting baseline."""
+        """Ensure consecutive settlements chain fixed windows from prior settlement end."""
 
         class _FakeRepo:
             def __init__(self, latest_end):
@@ -144,7 +144,7 @@ class TestPostgresSettlementBasics:
                 return {"bucket": bucket, "carry_btc": Decimal("0")}
 
         latest_end = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
-        now = datetime(2026, 1, 1, 12, 5, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 12, 15, tzinfo=UTC)
         repo = _FakeRepo(latest_end)
 
         result = run_settlement_postgres(
@@ -157,12 +157,12 @@ class TestPostgresSettlementBasics:
         assert len(repo.range_calls) == 1
         called_start, called_end = repo.range_calls[0]
         assert called_start == latest_end
-        assert called_end == now
+        assert called_end == latest_end + timedelta(minutes=10)
         assert result.period_start == latest_end
-        assert result.period_end == now
+        assert result.period_end == latest_end + timedelta(minutes=10)
 
     def test_next_window_with_lag_still_starts_from_previous_end(self):
-        """Ensure scheduler lag does not create a sliding overlapping contribution window."""
+        """Ensure scheduler lag still produces one fixed interval window from prior end."""
 
         class _FakeRepo:
             def __init__(self, latest_end):
@@ -215,9 +215,54 @@ class TestPostgresSettlementBasics:
         assert len(repo.range_calls) == 1
         called_start, called_end = repo.range_calls[0]
         assert called_start == latest_end
-        assert called_end == now
+        assert called_end == latest_end + timedelta(minutes=10)
         assert result.period_start == latest_end
-        assert result.period_end == now
+        assert result.period_end == latest_end + timedelta(minutes=10)
+
+    def test_early_scheduler_run_returns_latest_without_creating_partial_window(self):
+        """Ensure runs earlier than the full interval do not create short settlement windows."""
+
+        class _FakeRepo:
+            def __init__(self, latest_end):
+                self.latest_end = latest_end
+                self.range_calls = []
+
+            def get_latest_settlement_window(self):
+                return {
+                    "id": 300,
+                    "status": "completed",
+                    "work_window_start": self.latest_end - timedelta(minutes=10),
+                    "work_window_end": self.latest_end,
+                    "total_shares": 10,
+                    "total_work": Decimal("100"),
+                    "total_reward_sats": 1000,
+                    "sqlite_settlement_id": None,
+                }
+
+            def get_settlement_window_by_range(self, *, work_window_start, work_window_end):
+                self.range_calls.append((work_window_start, work_window_end))
+                return None
+
+            def list_settlement_user_credits_with_users(self, _settlement_id):
+                return []
+
+            def get_carry_state(self, *, bucket="default"):
+                return {"bucket": bucket, "carry_btc": Decimal("0")}
+
+        latest_end = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 12, 2, tzinfo=UTC)
+        repo = _FakeRepo(latest_end)
+
+        result = run_settlement_postgres(
+            repo,
+            now,
+            interval_minutes=10,
+            payout_decimals=8,
+        )
+
+        assert result.period_start == latest_end - timedelta(minutes=10)
+        assert result.period_end == latest_end
+        assert not repo.range_calls
 
     def test_naive_work_window_end_does_not_crash_maturity_offset_math(self):
         """Ensure mixed naive/aware inputs are normalized before maturity offset subtraction."""

@@ -226,21 +226,23 @@ def run_settlement_postgres(
     if latest_settlement is None:
         period_start = period_end - timedelta(minutes=interval)
     else:
-        if period_end <= latest_settlement["work_window_end"]:
+        latest_work_end = _as_utc_aware(latest_settlement["work_window_end"])
+        period_start = latest_work_end
+        period_end = period_start + timedelta(minutes=interval)
+        if now_aware < period_end:
             payout_rows = repository.list_settlement_user_credits_with_users(int(latest_settlement["id"]))
             carry = _get_or_create_carry_postgres(repository)
             return SettlementResult(
                 settlement_id=int(latest_settlement.get("sqlite_settlement_id") or latest_settlement["id"]),
                 status=latest_settlement["status"],
                 user_count=len(payout_rows),
-                period_start=latest_settlement["work_window_start"],
-                period_end=latest_settlement["work_window_end"],
+                period_start=_as_utc_aware(latest_settlement["work_window_start"]),
+                period_end=latest_work_end,
                 total_shares=int(latest_settlement.get("total_shares") or 0),
                 total_work=Decimal(str(latest_settlement.get("total_work") or 0)),
                 pool_reward_btc=Decimal(str(latest_settlement.get("total_reward_sats") or 0)) / Decimal("100000000"),
                 carry_btc=Decimal(str(carry.get("carry_btc") or 0)),
             )
-        period_start = latest_settlement["work_window_end"]
 
     existing_settlement = repository.get_settlement_window_by_range(
         work_window_start=_as_utc_aware(period_start),
