@@ -39,6 +39,7 @@ class Sv1Submit:
     ntime: str
     nonce: str
     raw_json: dict[str, Any]
+    version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -128,6 +129,11 @@ def parse_mining_submit(message: str | bytes | Mapping[str, Any]) -> Sv1Submit |
     params = payload.get("params")
     if not isinstance(params, list) or len(params) < 5:
         return None
+    submit_version: str | None = None
+    if len(params) >= 6 and params[5] is not None:
+        raw_ver = str(params[5]).strip()
+        if raw_ver:
+            submit_version = raw_ver.lower()
     return Sv1Submit(
         worker_identity=str(params[0]) if params[0] is not None else None,
         job_id=str(params[1]),
@@ -135,6 +141,7 @@ def parse_mining_submit(message: str | bytes | Mapping[str, Any]) -> Sv1Submit |
         ntime=str(params[3]).lower(),
         nonce=str(params[4]).lower(),
         raw_json=payload,
+        version=submit_version,
     )
 
 
@@ -221,8 +228,9 @@ def reconstruct_submit_candidate(
 
     coinbase = reconstruct_coinbase(job, extranonce1, submit.extranonce2)
     merkle_root = compute_merkle_root(coinbase, job.merkle_branches)
+    header_version = submit.version if submit.version is not None else job.version
     header = build_block_header(
-        version=job.version,
+        version=header_version,
         prev_hash=job.prev_hash,
         merkle_root=merkle_root,
         ntime=submit.ntime,
@@ -257,7 +265,7 @@ def reconstruct_submit_candidate(
             extranonce2=submit.extranonce2,
             ntime=submit.ntime,
             nonce=submit.nonce,
-            version=job.version,
+            version=header_version,
             prev_hash=job.prev_hash,
             nbits=job.nbits,
             source="sv1_capture_proxy",
