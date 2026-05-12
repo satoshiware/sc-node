@@ -18,6 +18,9 @@ log() {
     echo "$*" | tee -a "$LOG_FILE"
 }
 
+# Log the exit code of every run (success or failure)
+trap 'log "setup.sh exited with code $?"' EXIT
+
 log "=== setup.sh started ==="
 
 # ────────────────────────────────────────────────
@@ -55,32 +58,23 @@ else
 fi
 
 # ────────────────────────────────────────────────
-# System update & cleanup — with lock conflict prevention
+# System update & cleanup
 # ────────────────────────────────────────────────
-log "Preventing apt-daily timer conflicts..."
-systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
-systemctl stop apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
-log "apt-daily timers/services stopped (if active)"
+log "Starting system update sequence..."
 
-log "Updating system packages (with lock timeout & retry)..."
-for attempt in {1..3}; do
-    log "Update/Upgrade attempt $attempt/3..."
-    if DEBIAN_FRONTEND=noninteractive \
-       apt -o DPkg::Lock::Timeout=300 update -y && \
-       DEBIAN_FRONTEND=noninteractive \
-       apt -o DPkg::Lock::Timeout=300 upgrade -y && \
-       DEBIAN_FRONTEND=noninteractive apt autoremove -y && \
-       apt autoclean -y; then
-        log "System update complete on attempt $attempt"
-        break
-    else
-        log "Update attempt $attempt failed — waiting 30s before retry..."
-        sleep 30
-    fi
-done || { log "ERROR: All update attempts failed — check logs"; exit 1; }
+log "apt update..."
+apt update -y && log "apt update OK" || { log "ERROR: apt update failed (code $?)"; exit 1; }
 
-# Restart timers after update
-systemctl start apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+log "apt upgrade..."
+apt upgrade -y && log "apt upgrade OK" || { log "ERROR: apt upgrade failed (code $?)"; exit 1; }
+
+log "apt autoremove..."
+apt autoremove -y && log "apt autoremove OK" || { log "ERROR: apt autoremove failed (code $?)"; exit 1; }
+
+log "apt autoclean..."
+apt autoclean -y && log "apt autoclean OK" || { log "ERROR: apt autoclean failed (code $?)"; exit 1; }
+
+log "System update complete"
 
 # ────────────────────────────────────────────────
 # Python symlink (python → python3)
@@ -153,4 +147,6 @@ fi
 # Done!!
 # ────────────────────────────────────────────────
 log "=== setup.sh completed successfully ==="
-exit 0
+log "Rebooting in 1 minute..."
+shutdown -r +1 "Setup complete — rebooting in 60 seconds. Cancel with: shutdown -c"
+exec true # Fallback success exit if shutdown invocation failed

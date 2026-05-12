@@ -101,7 +101,7 @@ Binrary Location: [sc-node releases](https://github.com/satoshiware/sc-node/rele
    nano azpool-backend.env
    ```
 
-   **Pay very close attention** when editing `azpool-backend.env`.  
+   **Pay very close attention** when editing `azpool-backend.env`.
    This file contains all critical settings including download URLs, SHA256 checksums, FIDO2 public keys, hostname, ports, and security options.
 
 3. Run the installer:
@@ -122,6 +122,7 @@ Binrary Location: [sc-node releases](https://github.com/satoshiware/sc-node/rele
   - SSH (22/tcp)
   - AZCoin P2P port (configured in env file)
   - WireGuard port (configured in env file)
+  - Template Provider port
 - Detailed daily management instructions (FIDO2 keys, WireGuard, commands, paths, etc.) are located in `/home/satoshi/readme.txt` on the server.
 
 For more technical details about the setup process, review `azpool-backend-setup.sh`.

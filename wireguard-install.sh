@@ -83,7 +83,7 @@ PublicKey = <SERVER_PUBLIC_KEY_HERE>
 Endpoint = <SERVER_DOMAIN_HERE>:51820
 
 # Route traffic for the server through this WireGuard tunnel IP
-AllowedIPs = 10.66.66.1/32
+AllowedIPs = 10.66.0.1/32
 
 # Send keepalive packets (helps when behind NAT or firewall)
 PersistentKeepalive = 25
