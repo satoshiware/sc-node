@@ -29,6 +29,7 @@ class Sv1NotifyJob:
     ntime: str
     clean_jobs: bool
     raw_json: dict[str, Any]
+    version_rolling_mask: str | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,7 @@ class ReconstructionResult:
     candidate_hash: str
     target: int
     candidate_value: int
+    header_version: str
     event: TranslatorCandidateBlockEvent | None = None
 
 
@@ -108,6 +110,13 @@ def parse_mining_notify(message: str | bytes | Mapping[str, Any]) -> Sv1NotifyJo
         return None
     if not all(isinstance(branch, str) for branch in branches):
         return None
+    version_rolling_mask: str | None = None
+    if len(params) >= 10 and isinstance(params[9], dict):
+        vr = params[9].get("version-rolling")
+        if isinstance(vr, dict) and isinstance(vr.get("mask"), str):
+            raw_mask = vr["mask"].strip().lower()
+            if len(raw_mask) == 8 and HEX_RE.fullmatch(raw_mask):
+                version_rolling_mask = raw_mask
     return Sv1NotifyJob(
         job_id=str(params[0]),
         prev_hash=str(params[1]).lower(),
@@ -119,6 +128,7 @@ def parse_mining_notify(message: str | bytes | Mapping[str, Any]) -> Sv1NotifyJo
         ntime=str(params[7]).lower(),
         clean_jobs=bool(params[8]),
         raw_json=payload,
+        version_rolling_mask=version_rolling_mask,
     )
 
 
@@ -211,6 +221,32 @@ def candidate_blockhash_from_header(header: bytes) -> str:
     return double_sha256(header)[::-1].hex()
 
 
+def merge_sv1_header_version(
+    job_version: str,
+    submit_version: str | None,
+    version_rolling_mask: str | None,
+) -> str:
+    """Combine job/base block version with SV1 mining.submit version-rolling bits.
+
+    When the pool sends a partial ``version`` on ``mining.submit``, it must be
+    merged with the template version from ``mining.notify``, not used as the
+    full 32-bit header version.
+    """
+    if submit_version is None:
+        return job_version
+    _require_hex("job_version", job_version, expected_length=8)
+    _require_hex("submit_version", submit_version, expected_length=8)
+    job_i = int(job_version, 16)
+    submit_i = int(submit_version, 16)
+    if version_rolling_mask is not None:
+        _require_hex("version_rolling_mask", version_rolling_mask, expected_length=8)
+        mask_i = int(version_rolling_mask, 16)
+        combined = (job_i & ~mask_i) | (submit_i & mask_i)
+    else:
+        combined = job_i | submit_i
+    return f"{combined & 0xFFFFFFFF:08x}"
+
+
 def reconstruct_submit_candidate(
     *,
     job: Sv1NotifyJob,
@@ -228,7 +264,9 @@ def reconstruct_submit_candidate(
 
     coinbase = reconstruct_coinbase(job, extranonce1, submit.extranonce2)
     merkle_root = compute_merkle_root(coinbase, job.merkle_branches)
-    header_version = submit.version if submit.version is not None else job.version
+    header_version = merge_sv1_header_version(
+        job.version, submit.version, job.version_rolling_mask
+    )
     header = build_block_header(
         version=header_version,
         prev_hash=job.prev_hash,
@@ -247,6 +285,7 @@ def reconstruct_submit_candidate(
             candidate_hash=blockhash,
             target=target,
             candidate_value=candidate_value,
+            header_version=header_version,
         )
 
     identity = worker_identity if worker_identity is not None else submit.worker_identity
@@ -255,6 +294,7 @@ def reconstruct_submit_candidate(
         candidate_hash=blockhash,
         target=target,
         candidate_value=candidate_value,
+        header_version=header_version,
         event=TranslatorCandidateBlockEvent(
             found_time=found_time,
             found_time_unix=int(found_time.timestamp()),

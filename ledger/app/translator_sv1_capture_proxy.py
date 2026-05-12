@@ -10,6 +10,7 @@ from typing import Any, Callable, Protocol
 
 from app.translator_candidate_reconstruction import (
     Sv1NotifyJob,
+    merge_sv1_header_version,
     parse_mining_authorize,
     parse_mining_notify,
     parse_mining_submit,
@@ -20,6 +21,18 @@ from app.translator_candidate_reconstruction import (
 
 LOGGER = logging.getLogger(__name__)
 MAX_BUFFER_BYTES = 1024 * 1024
+
+
+def _kv(value: Any) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _kv_message(parts: list[tuple[str, Any]]) -> str:
+    return " ".join(f"{k}={_kv(v)}" for k, v in parts)
 
 
 class TranslatorCandidateBlockRepository(Protocol):
@@ -128,9 +141,27 @@ class TranslatorSv1SessionProcessor:
         job_state_exists = job is not None
         extranonce1_exists = self.extranonce1 is not None
         worker_identity = self.worker_identity or submit.worker_identity
-        version = submit.version if submit.version is not None else (job.version if job is not None else None)
+        if job is not None:
+            merged_version = merge_sv1_header_version(
+                job.version, submit.version, job.version_rolling_mask
+            )
+        else:
+            merged_version = submit.version
         self.logger.info(
-            "mining_submit_seen",
+            _kv_message(
+                [
+                    ("event", "mining_submit_seen"),
+                    ("worker_identity", worker_identity),
+                    ("job_id", submit.job_id),
+                    ("extranonce2", submit.extranonce2),
+                    ("ntime", submit.ntime),
+                    ("nonce", submit.nonce),
+                    ("version", merged_version),
+                    ("submit_version", submit.version),
+                    ("job_state_exists", job_state_exists),
+                    ("extranonce1_exists", extranonce1_exists),
+                ]
+            ),
             extra={
                 "event": "mining_submit_seen",
                 "worker_identity": worker_identity,
@@ -138,7 +169,8 @@ class TranslatorSv1SessionProcessor:
                 "extranonce2": submit.extranonce2,
                 "ntime": submit.ntime,
                 "nonce": submit.nonce,
-                "version": version,
+                "version": merged_version,
+                "submit_version": submit.version,
                 "job_state_exists": job_state_exists,
                 "extranonce1_exists": extranonce1_exists,
             },
@@ -161,7 +193,21 @@ class TranslatorSv1SessionProcessor:
         )
         reason = None if result.block_found else "candidate_hash_above_nbits_target"
         self.logger.info(
-            "candidate_reconstructed",
+            _kv_message(
+                [
+                    ("event", "candidate_reconstructed"),
+                    ("job_id", submit.job_id),
+                    ("blockhash", result.candidate_hash),
+                    ("target", result.target),
+                    ("nbits", job.nbits),
+                    ("meets_target", result.block_found),
+                    ("reason", reason),
+                    ("version", result.header_version),
+                    ("submit_version", submit.version),
+                    ("nonce", submit.nonce),
+                    ("ntime", submit.ntime),
+                ]
+            ),
             extra={
                 "event": "candidate_reconstructed",
                 "job_id": submit.job_id,
@@ -171,6 +217,10 @@ class TranslatorSv1SessionProcessor:
                 "nbits": job.nbits,
                 "meets_target": result.block_found,
                 "reason": reason,
+                "version": result.header_version,
+                "submit_version": submit.version,
+                "nonce": submit.nonce,
+                "ntime": submit.ntime,
             },
         )
         if not result.block_found or result.event is None:
@@ -182,7 +232,13 @@ class TranslatorSv1SessionProcessor:
             self.logger.error("translator candidate block found but repository is not configured")
             return
         self.logger.info(
-            "candidate_insert_attempted",
+            _kv_message(
+                [
+                    ("event", "candidate_insert_attempted"),
+                    ("blockhash", result.event.blockhash),
+                    ("job_id", result.event.job_id),
+                ]
+            ),
             extra={
                 "event": "candidate_insert_attempted",
                 "job_id": result.event.job_id,
@@ -190,23 +246,39 @@ class TranslatorSv1SessionProcessor:
             },
         )
         try:
-            self.repository.insert_translator_candidate_block(result.event)
+            inserted = self.repository.insert_translator_candidate_block(result.event)
+            row_id = inserted.get("id") if isinstance(inserted, dict) else None
             self.logger.info(
-                "candidate_insert_succeeded",
+                _kv_message(
+                    [
+                        ("event", "candidate_insert_succeeded"),
+                        ("blockhash", result.event.blockhash),
+                        ("id", row_id),
+                    ]
+                ),
                 extra={
                     "event": "candidate_insert_succeeded",
                     "job_id": result.event.job_id,
                     "blockhash": result.event.blockhash,
+                    "id": row_id,
                 },
             )
         except Exception as exc:
             self.logger.info(
-                "candidate_insert_failed",
+                _kv_message(
+                    [
+                        ("event", "candidate_insert_failed"),
+                        ("blockhash", result.event.blockhash),
+                        ("error_type", type(exc).__name__),
+                        ("error", str(exc)),
+                    ]
+                ),
                 extra={
                     "event": "candidate_insert_failed",
                     "job_id": result.event.job_id,
                     "blockhash": result.event.blockhash,
                     "error": str(exc),
+                    "error_type": type(exc).__name__,
                 },
             )
             self.logger.exception("failed to insert translator candidate block; forwarding continues")

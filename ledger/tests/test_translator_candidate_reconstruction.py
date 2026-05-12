@@ -13,6 +13,7 @@ from app.translator_candidate_reconstruction import (
     parse_mining_submit,
     reconstruct_coinbase,
     reconstruct_submit_candidate,
+    merge_sv1_header_version,
 )
 
 
@@ -83,7 +84,7 @@ def test_mining_submit_reconstructs_candidate_blockhash() -> None:
     coinbase = reconstruct_coinbase(job, EXTRANONCE1, submit.extranonce2)
     merkle_root = compute_merkle_root(coinbase, job.merkle_branches)
     header = build_block_header(
-        version=job.version,
+        version=result.header_version,
         prev_hash=job.prev_hash,
         merkle_root=merkle_root,
         ntime=submit.ntime,
@@ -132,7 +133,7 @@ def test_non_block_share_is_not_classified_as_block_found() -> None:
 
 
 
-def test_mining_submit_optional_sixth_param_overrides_notify_version_for_header() -> None:
+def test_mining_submit_sixth_param_merged_with_job_base_version_for_header() -> None:
     job = parse_mining_notify(_notify())
     submit_lo = parse_mining_submit(
         {
@@ -152,7 +153,61 @@ def test_mining_submit_optional_sixth_param_overrides_notify_version_for_header(
     assert submit_hi.version == "20100000"
     r_lo = reconstruct_submit_candidate(job=job, submit=submit_lo, extranonce1=EXTRANONCE1, found_time=FOUND_TIME)
     r_hi = reconstruct_submit_candidate(job=job, submit=submit_hi, extranonce1=EXTRANONCE1, found_time=FOUND_TIME)
+    assert r_lo.header_version == "20000000"
+    assert r_hi.header_version == "20100000"
     assert r_lo.candidate_hash != r_hi.candidate_hash
+
+
+def test_merge_sv1_header_version_sc2_may_2026_production_regression() -> None:
+    assert merge_sv1_header_version("20000000", "00100000", None) == "20100000"
+    assert merge_sv1_header_version("20000000", None, None) == "20000000"
+
+
+def test_reconstruct_header_version_sc2_submit_bits_may_2026() -> None:
+    job = parse_mining_notify(_notify())
+    submit = parse_mining_submit(
+        {
+            "id": 9,
+            "method": "mining.submit",
+            "params": ["Ben.Cust", "job-1", "e8030000", "6a039be9", "16b092d4", "00100000"],
+        }
+    )
+    assert job is not None and submit is not None
+    result = reconstruct_submit_candidate(
+        job=job,
+        submit=submit,
+        extranonce1=EXTRANONCE1,
+        found_time=FOUND_TIME,
+    )
+    assert result.header_version == "20100000"
+    assert submit.version == "00100000"
+
+
+def test_merge_sv1_header_version_respects_pool_mask_when_present() -> None:
+    mask = "001fffff"
+    assert merge_sv1_header_version("20000000", "00100000", mask) == "20100000"
+
+
+def test_parse_mining_notify_extracts_version_rolling_mask() -> None:
+    payload = {
+        "id": None,
+        "method": "mining.notify",
+        "params": [
+            "job-1",
+            "00" * 32,
+            "0100000001",
+            "ffffffff",
+            ["11" * 32, "22" * 32],
+            "20000000",
+            "2200ffff",
+            "65000000",
+            True,
+            {"version-rolling": {"mask": "001fffff", "min-bit": 13}},
+        ],
+    }
+    job = parse_mining_notify(payload)
+    assert job is not None
+    assert job.version_rolling_mask == "001fffff"
 
 
 def test_reconstructed_event_includes_worker_identity_and_safe_fields() -> None:

@@ -46,7 +46,8 @@ class FakeRepository:
         if row["blockhash"] not in self.blockhashes:
             self.blockhashes.add(row["blockhash"])
             self.rows.append(row)
-        return row
+        row_id = next(i + 1 for i, r in enumerate(self.rows) if r["blockhash"] == row["blockhash"])
+        return {**row, "id": row_id}
 
 
 def _prime_processor(repository=None, *, dry_run=False) -> TranslatorSv1SessionProcessor:
@@ -94,8 +95,19 @@ def test_mining_submit_seen_and_reconstruction_logs_normal_submit(caplog) -> Non
     assert len(recon) == 1
     assert recon[0].meets_target is True
     assert recon[0].reason is None
+    rmsg = recon[0].getMessage()
+    assert "event=candidate_reconstructed" in rmsg
+    assert "blockhash=" in rmsg
+    assert "meets_target=" in rmsg
+    assert "version=" in rmsg
+    assert "job_id=" in rmsg
+    assert "submit_version=" in rmsg
     assert "candidate_insert_attempted" in [getattr(r, "event", None) for r in caplog.records]
     assert "candidate_insert_succeeded" in [getattr(r, "event", None) for r in caplog.records]
+    ok = _records_by_event(caplog, "candidate_insert_succeeded")
+    assert len(ok) == 1
+    assert "id=" in ok[0].getMessage()
+    assert "blockhash=" in ok[0].getMessage()
 
 
 def test_mining_submit_seen_unknown_job_id(caplog) -> None:
@@ -136,6 +148,11 @@ def test_candidate_reconstructed_non_target_meeting_submit(caplog) -> None:
     assert len(recon) == 1
     assert recon[0].meets_target is False
     assert recon[0].reason == "candidate_hash_above_nbits_target"
+    rmsg = recon[0].getMessage()
+    assert "event=candidate_reconstructed" in rmsg
+    assert "meets_target=false" in rmsg
+    assert "blockhash=" in rmsg
+    assert "version=" in rmsg
     assert repository.rows == []
 
 
@@ -148,6 +165,11 @@ def test_candidate_insert_failed_emits_info_event(caplog) -> None:
     failed = _records_by_event(caplog, "candidate_insert_failed")
     assert len(failed) == 1
     assert failed[0].error
+    assert failed[0].error_type == "RuntimeError"
+    fmsg = failed[0].getMessage()
+    assert "event=candidate_insert_failed" in fmsg
+    assert "error_type=" in fmsg
+    assert "error=" in fmsg
 
 
 def test_dry_run_emits_reconstruction_but_no_insert_logs(caplog) -> None:
@@ -158,6 +180,25 @@ def test_dry_run_emits_reconstruction_but_no_insert_logs(caplog) -> None:
     assert _records_by_event(caplog, "candidate_reconstructed")[0].meets_target is True
     assert _records_by_event(caplog, "candidate_insert_attempted") == []
     assert repository.rows == []
+
+
+SUBMIT_SC2_VERSION_ROLL = (
+    b'{"id":9,"method":"mining.submit","params":["Ben.Cust","job-1","e8030000","6a039be9","16b092d4","00100000"]}\n'
+)
+
+
+def test_candidate_reconstructed_logs_merged_version_sc2_production_bits(caplog) -> None:
+    repository = FakeRepository()
+    with caplog.at_level(logging.INFO, "app.translator_sv1_capture_proxy"):
+        processor = _prime_processor(repository, dry_run=False)
+        processor.process_downstream_bytes(SUBMIT_SC2_VERSION_ROLL)
+    recon = _records_by_event(caplog, "candidate_reconstructed")[0]
+    msg = recon.getMessage()
+    assert "version=20100000" in msg
+    assert "submit_version=00100000" in msg
+    assert "job_id=job-1" in msg
+    assert "blockhash=" in msg
+    assert "meets_target=" in msg
 
 
 def test_mining_submit_candidate_event_triggers_insert_when_target_is_met() -> None:
