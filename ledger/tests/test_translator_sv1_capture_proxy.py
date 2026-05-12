@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import asdict
 
 import pytest
@@ -71,6 +72,92 @@ def test_mining_notify_stores_job_state() -> None:
 
     assert processor.jobs["job-1"].job_id == "job-1"
     assert processor.jobs["job-1"].nbits == "2200ffff"
+
+
+
+def _records_by_event(caplog, name: str):
+    return [r for r in caplog.records if getattr(r, "event", None) == name]
+
+
+def test_mining_submit_seen_and_reconstruction_logs_normal_submit(caplog) -> None:
+    repository = FakeRepository()
+    with caplog.at_level(logging.INFO, "app.translator_sv1_capture_proxy"):
+        processor = _prime_processor(repository, dry_run=False)
+        processor.process_downstream_bytes(SUBMIT)
+    seen = _records_by_event(caplog, "mining_submit_seen")
+    assert len(seen) == 1
+    assert seen[0].job_id == "job-1"
+    assert seen[0].job_state_exists is True
+    assert seen[0].extranonce1_exists is True
+    assert seen[0].version == "20000000"
+    recon = _records_by_event(caplog, "candidate_reconstructed")
+    assert len(recon) == 1
+    assert recon[0].meets_target is True
+    assert recon[0].reason is None
+    assert "candidate_insert_attempted" in [getattr(r, "event", None) for r in caplog.records]
+    assert "candidate_insert_succeeded" in [getattr(r, "event", None) for r in caplog.records]
+
+
+def test_mining_submit_seen_unknown_job_id(caplog) -> None:
+    processor = TranslatorSv1SessionProcessor(repository=None, dry_run=True)
+    processor.process_upstream_bytes(EXTRANONCE1_RESPONSE)
+    processor.process_downstream_bytes(AUTHORIZE)
+    bad_submit = SUBMIT.replace(b"job-1", b"job-unknown")
+    with caplog.at_level(logging.INFO, "app.translator_sv1_capture_proxy"):
+        processor.process_downstream_bytes(bad_submit)
+    seen = _records_by_event(caplog, "mining_submit_seen")
+    assert len(seen) == 1
+    assert seen[0].job_id == "job-unknown"
+    assert seen[0].job_state_exists is False
+    assert _records_by_event(caplog, "candidate_reconstructed") == []
+
+
+def test_mining_submit_seen_missing_extranonce1(caplog) -> None:
+    processor = TranslatorSv1SessionProcessor(repository=None, dry_run=True)
+    processor.process_upstream_bytes(NOTIFY)
+    processor.process_downstream_bytes(AUTHORIZE)
+    with caplog.at_level(logging.INFO, "app.translator_sv1_capture_proxy"):
+        processor.process_downstream_bytes(SUBMIT)
+    seen = _records_by_event(caplog, "mining_submit_seen")
+    assert len(seen) == 1
+    assert seen[0].extranonce1_exists is False
+    assert _records_by_event(caplog, "candidate_reconstructed") == []
+
+
+def test_candidate_reconstructed_non_target_meeting_submit(caplog) -> None:
+    repository = FakeRepository()
+    processor = TranslatorSv1SessionProcessor(repository=repository, dry_run=False)
+    processor.process_upstream_bytes(EXTRANONCE1_RESPONSE)
+    processor.process_upstream_bytes(NON_BLOCK_NOTIFY)
+    processor.process_downstream_bytes(AUTHORIZE)
+    with caplog.at_level(logging.INFO, "app.translator_sv1_capture_proxy"):
+        processor.process_downstream_bytes(SUBMIT)
+    recon = _records_by_event(caplog, "candidate_reconstructed")
+    assert len(recon) == 1
+    assert recon[0].meets_target is False
+    assert recon[0].reason == "candidate_hash_above_nbits_target"
+    assert repository.rows == []
+
+
+def test_candidate_insert_failed_emits_info_event(caplog) -> None:
+    repository = FakeRepository(fail_on_duplicate=True)
+    with caplog.at_level(logging.INFO, "app.translator_sv1_capture_proxy"):
+        processor = _prime_processor(repository, dry_run=False)
+        processor.process_downstream_bytes(SUBMIT)
+        processor.process_downstream_bytes(SUBMIT)
+    failed = _records_by_event(caplog, "candidate_insert_failed")
+    assert len(failed) == 1
+    assert failed[0].error
+
+
+def test_dry_run_emits_reconstruction_but_no_insert_logs(caplog) -> None:
+    repository = FakeRepository()
+    with caplog.at_level(logging.INFO, "app.translator_sv1_capture_proxy"):
+        processor = _prime_processor(repository, dry_run=True)
+        processor.process_downstream_bytes(SUBMIT)
+    assert _records_by_event(caplog, "candidate_reconstructed")[0].meets_target is True
+    assert _records_by_event(caplog, "candidate_insert_attempted") == []
+    assert repository.rows == []
 
 
 def test_mining_submit_candidate_event_triggers_insert_when_target_is_met() -> None:

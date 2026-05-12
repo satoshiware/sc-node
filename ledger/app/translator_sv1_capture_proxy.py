@@ -125,6 +125,24 @@ class TranslatorSv1SessionProcessor:
         if submit is None:
             return
         job = self.jobs.get(submit.job_id)
+        job_state_exists = job is not None
+        extranonce1_exists = self.extranonce1 is not None
+        worker_identity = self.worker_identity or submit.worker_identity
+        version = submit.version if submit.version is not None else (job.version if job is not None else None)
+        self.logger.info(
+            "mining_submit_seen",
+            extra={
+                "event": "mining_submit_seen",
+                "worker_identity": worker_identity,
+                "job_id": submit.job_id,
+                "extranonce2": submit.extranonce2,
+                "ntime": submit.ntime,
+                "nonce": submit.nonce,
+                "version": version,
+                "job_state_exists": job_state_exists,
+                "extranonce1_exists": extranonce1_exists,
+            },
+        )
         if job is None:
             self.logger.debug("ignoring SV1 submit for unknown job_id %s", submit.job_id)
             return
@@ -132,7 +150,6 @@ class TranslatorSv1SessionProcessor:
             self.logger.debug("ignoring SV1 submit for job_id %s until extranonce1 is known", submit.job_id)
             return
 
-        worker_identity = self.worker_identity or submit.worker_identity
         channel_id = self._safe_channel_lookup(worker_identity)
         result = reconstruct_submit_candidate(
             job=job,
@@ -142,23 +159,56 @@ class TranslatorSv1SessionProcessor:
             worker_identity=worker_identity,
             channel_id=channel_id,
         )
+        reason = None if result.block_found else "candidate_hash_above_nbits_target"
+        self.logger.info(
+            "candidate_reconstructed",
+            extra={
+                "event": "candidate_reconstructed",
+                "job_id": submit.job_id,
+                "reconstructed_hash": result.candidate_hash,
+                "blockhash": result.candidate_hash,
+                "target": result.target,
+                "nbits": job.nbits,
+                "meets_target": result.block_found,
+                "reason": reason,
+            },
+        )
         if not result.block_found or result.event is None:
             self.logger.debug("SV1 submit candidate hash %s did not meet target", result.candidate_hash)
             return
         if self.dry_run:
-            self.logger.info(
-                "dry-run translator candidate block found: blockhash=%s worker_identity=%s",
-                result.event.blockhash,
-                result.event.worker_identity,
-            )
             return
         if self.repository is None:
             self.logger.error("translator candidate block found but repository is not configured")
             return
+        self.logger.info(
+            "candidate_insert_attempted",
+            extra={
+                "event": "candidate_insert_attempted",
+                "job_id": result.event.job_id,
+                "blockhash": result.event.blockhash,
+            },
+        )
         try:
             self.repository.insert_translator_candidate_block(result.event)
-            self.logger.info("inserted translator candidate block %s", result.event.blockhash)
-        except Exception:
+            self.logger.info(
+                "candidate_insert_succeeded",
+                extra={
+                    "event": "candidate_insert_succeeded",
+                    "job_id": result.event.job_id,
+                    "blockhash": result.event.blockhash,
+                },
+            )
+        except Exception as exc:
+            self.logger.info(
+                "candidate_insert_failed",
+                extra={
+                    "event": "candidate_insert_failed",
+                    "job_id": result.event.job_id,
+                    "blockhash": result.event.blockhash,
+                    "error": str(exc),
+                },
+            )
             self.logger.exception("failed to insert translator candidate block; forwarding continues")
 
     def _process_upstream_line(self, line: bytes) -> None:

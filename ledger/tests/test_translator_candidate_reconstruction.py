@@ -131,6 +131,30 @@ def test_non_block_share_is_not_classified_as_block_found() -> None:
     assert result.event is None
 
 
+
+def test_mining_submit_optional_sixth_param_overrides_notify_version_for_header() -> None:
+    job = parse_mining_notify(_notify())
+    submit_lo = parse_mining_submit(
+        {
+            "id": 9,
+            "method": "mining.submit",
+            "params": ["baveetstudy.miner2", "job-1", "0a0b0c0d", "65000001", "00000000", "20000000"],
+        }
+    )
+    submit_hi = parse_mining_submit(
+        {
+            "id": 9,
+            "method": "mining.submit",
+            "params": ["baveetstudy.miner2", "job-1", "0a0b0c0d", "65000001", "00000000", "20100000"],
+        }
+    )
+    assert job is not None and submit_lo is not None and submit_hi is not None
+    assert submit_hi.version == "20100000"
+    r_lo = reconstruct_submit_candidate(job=job, submit=submit_lo, extranonce1=EXTRANONCE1, found_time=FOUND_TIME)
+    r_hi = reconstruct_submit_candidate(job=job, submit=submit_hi, extranonce1=EXTRANONCE1, found_time=FOUND_TIME)
+    assert r_lo.candidate_hash != r_hi.candidate_hash
+
+
 def test_reconstructed_event_includes_worker_identity_and_safe_fields() -> None:
     job = parse_mining_notify(_notify())
     submit = parse_mining_submit(_submit())
