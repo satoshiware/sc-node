@@ -11,6 +11,7 @@ from app.postgres_settlement import (
     _get_or_create_carry_postgres,
     _get_or_create_accrual_bucket_postgres,
 )
+from app.pool_client import PoolApiError
 from app.settlement import run_settlement, SettlementResult
 from app.delta import UserContribution
 
@@ -217,3 +218,37 @@ class TestPostgresSettlementBasics:
         assert called_end == now
         assert result.period_start == latest_end
         assert result.period_end == now
+
+    def test_naive_work_window_end_does_not_crash_maturity_offset_math(self):
+        """Ensure mixed naive/aware inputs are normalized before maturity offset subtraction."""
+
+        class _FakeRepo:
+            def __init__(self):
+                self.upsert_calls = []
+
+            def get_latest_settlement_window(self):
+                return None
+
+            def get_settlement_window_by_range(self, *, work_window_start, work_window_end):
+                _ = (work_window_start, work_window_end)
+                return None
+
+            def upsert_settlement_window(self, **kwargs):
+                self.upsert_calls.append(kwargs)
+                return {"id": 1, **kwargs}
+
+        now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+        naive_work_window_end = datetime(2026, 1, 1, 11, 50)
+        repo = _FakeRepo()
+
+        result = run_settlement_postgres(
+            repo,
+            now,
+            interval_minutes=10,
+            payout_decimals=8,
+            work_window_end=naive_work_window_end,
+            reward_fetcher=lambda _start, _end: (_ for _ in ()).throw(PoolApiError("down")),
+        )
+
+        assert result.status == "blocked"
+        assert repo.upsert_calls

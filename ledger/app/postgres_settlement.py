@@ -218,6 +218,7 @@ def run_settlement_postgres(
     interval = interval_minutes or settings.payout_interval_minutes
     decimals = payout_decimals or settings.payout_decimals
     now_aware = _as_utc_aware(now)
+    work_window_end_aware = _as_utc_aware(work_window_end) if work_window_end is not None else None
 
     latest_settlement = repository.get_latest_settlement_window()
 
@@ -264,7 +265,7 @@ def run_settlement_postgres(
         settlement_run_at=now_aware,
         work_window_start=_as_utc_aware(period_start),
         work_window_end=_as_utc_aware(period_end),
-        maturity_offset_minutes=max(0, int((period_end - (work_window_end or period_end)).total_seconds() // 60)),
+        maturity_offset_minutes=max(0, int((period_end - (work_window_end_aware or period_end)).total_seconds() // 60)),
         status="pending",
         total_reward_sats=0,
         total_work=ZERO,
@@ -278,7 +279,7 @@ def run_settlement_postgres(
             settlement_run_at=now_aware,
             work_window_start=_as_utc_aware(period_start),
             work_window_end=_as_utc_aware(period_end),
-            maturity_offset_minutes=max(0, int((period_end - (work_window_end or period_end)).total_seconds() // 60)),
+            maturity_offset_minutes=max(0, int((period_end - (work_window_end_aware or period_end)).total_seconds() // 60)),
             status="blocked",
             total_reward_sats=0,
             total_work=ZERO,
@@ -311,7 +312,7 @@ def run_settlement_postgres(
         settlement_run_at=now_aware,
         work_window_start=_as_utc_aware(period_start),
         work_window_end=_as_utc_aware(period_end),
-        maturity_offset_minutes=max(0, int((period_end - (work_window_end or period_end)).total_seconds() // 60)),
+        maturity_offset_minutes=max(0, int((period_end - (work_window_end_aware or period_end)).total_seconds() // 60)),
         status="pending",
         total_reward_sats=int(pool_reward * Decimal("100000000")),
         total_work=_q(total_work, decimals),
@@ -325,7 +326,7 @@ def run_settlement_postgres(
             settlement_run_at=now_aware,
             work_window_start=_as_utc_aware(period_start),
             work_window_end=_as_utc_aware(period_end),
-            maturity_offset_minutes=max(0, int((period_end - (work_window_end or period_end)).total_seconds() // 60)),
+            maturity_offset_minutes=max(0, int((period_end - (work_window_end_aware or period_end)).total_seconds() // 60)),
             status="deferred",
             total_reward_sats=0,
             total_work=_q(total_work, decimals),
@@ -398,7 +399,7 @@ def run_settlement_postgres(
         settlement_run_at=now_aware,
         work_window_start=_as_utc_aware(period_start),
         work_window_end=_as_utc_aware(period_end),
-        maturity_offset_minutes=max(0, int((period_end - (work_window_end or period_end)).total_seconds() // 60)),
+        maturity_offset_minutes=max(0, int((period_end - (work_window_end_aware or period_end)).total_seconds() // 60)),
         status="completed",
         total_reward_sats=int(pool_reward * Decimal("100000000")),
         total_work=_q(total_work, decimals),
