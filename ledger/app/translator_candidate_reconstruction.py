@@ -73,6 +73,23 @@ class ReconstructionResult:
     target: int
     candidate_value: int
     header_version: str
+    submit_version: str | None
+    worker_identity: str | None
+    prev_hash_display: str
+    prev_hash_header_hex: str
+    nbits: str
+    ntime: str
+    nonce: str
+    sv1_extranonce1: str
+    sv1_extranonce2: str
+    sv1_full_extranonce: str
+    translated_full_extranonce: str | None
+    full_extranonce_used_for_reconstruction: str
+    coinbase_tx_hash: str
+    merkle_root: str
+    header_hex: str
+    meets_target: bool
+    reason: str | None
     event: TranslatorCandidateBlockEvent | None = None
 
 
@@ -159,6 +176,11 @@ def double_sha256(payload: bytes) -> bytes:
     return hashlib.sha256(hashlib.sha256(payload).digest()).digest()
 
 
+def coinbase_tx_hash_hex(coinbase: bytes) -> str:
+    """Bitcoin-style txid: double-SHA256 of raw tx, reversed for display."""
+    return double_sha256(coinbase)[::-1].hex()
+
+
 def decode_nbits_target(nbits: str) -> int:
     _require_hex("nbits", nbits, expected_length=8)
     compact = int(nbits, 16)
@@ -179,6 +201,46 @@ def reconstruct_coinbase(job: Sv1NotifyJob, extranonce1: str, extranonce2: str) 
     return bytes.fromhex(job.coinbase1 + extranonce1.lower() + extranonce2.lower() + job.coinbase2)
 
 
+
+def reconstruct_coinbase_with_full_extranonce(job: Sv1NotifyJob, full_extranonce_hex: str) -> bytes:
+    _require_hex("coinbase1", job.coinbase1)
+    _require_hex("coinbase2", job.coinbase2)
+    _require_hex("full_extranonce", full_extranonce_hex)
+    full = full_extranonce_hex.lower()
+    return bytes.fromhex(job.coinbase1 + full + job.coinbase2)
+
+
+def try_derive_translated_full_extranonce_for_pool(sv1_extranonce1: str, sv1_extranonce2: str) -> str | None:
+    """Best-effort SV1 → pool/SV2 full extranonce (same byte width as subscribe extranonce1).
+
+    Observed on production ``aztranslator``: pool ``SubmitSharesExtended.extranonce`` matches the
+    last ``len(extranonce1)-len(extranonce2)`` *bytes* of subscribe ``extranonce1`` followed by
+    submit ``extranonce2``, yielding a *single* field whose width equals ``len(extranonce1)``.
+
+    Classic 4-byte / 4-byte subscribe has ``len(extranonce1)==len(extranonce2)``; this returns
+    ``None`` so reconstruction keeps standard ``extranonce1||extranonce2`` between coinbase
+    fragments. If a deployment diverges, instrument translator SV2 framing instead of guessing.
+    """
+    try:
+        e1 = sv1_extranonce1.lower()
+        e2 = sv1_extranonce2.lower()
+        if len(e1) % 2 or len(e2) % 2:
+            return None
+        b1 = len(e1) // 2
+        b2 = len(e2) // 2
+        if b1 < 1 or b2 < 1 or b2 >= b1:
+            return None
+        suffix_bytes = b1 - b2
+        if 2 * suffix_bytes > len(e1):
+            return None
+        translated = e1[-(2 * suffix_bytes) :] + e2
+        if len(translated) != 2 * b1:
+            return None
+        return translated
+    except (TypeError, ValueError):
+        return None
+
+
 def compute_merkle_root(coinbase: bytes, merkle_branches: tuple[str, ...] | list[str]) -> bytes:
     root = double_sha256(coinbase)
     for branch in merkle_branches:
@@ -187,26 +249,37 @@ def compute_merkle_root(coinbase: bytes, merkle_branches: tuple[str, ...] | list
     return root
 
 
+def prev_hash_header_bytes_from_display(prev_hash_display_hex: str) -> bytes:
+    """Serialize ``mining.notify`` / human-display prev-block hash for the 80-byte header.
+
+    ``prev_hash_display_hex`` matches explorer-style hex (big-endian integer as written).
+    Bitcoin headers store the previous block hash as **full 32-byte reverse** of those
+    bytes—not uint32 word–local swaps.
+    """
+    _require_hex("prev_hash_display", prev_hash_display_hex, expected_length=64)
+    return bytes.fromhex(prev_hash_display_hex)[::-1]
+
+
 def build_block_header(
     *,
     version: str,
-    prev_hash: str,
+    prev_hash_display: str,
     merkle_root: bytes,
     ntime: str,
     nbits: str,
     nonce: str,
 ) -> bytes:
     _require_hex("version", version, expected_length=8)
-    _require_hex("prev_hash", prev_hash, expected_length=64)
     _require_hex("ntime", ntime, expected_length=8)
     _require_hex("nbits", nbits, expected_length=8)
     _require_hex("nonce", nonce, expected_length=8)
     if len(merkle_root) != 32:
         raise ValueError("merkle_root must be 32 bytes")
+    prev_hdr = prev_hash_header_bytes_from_display(prev_hash_display)
     return b"".join(
         [
             _uint32_le(version),
-            bytes.fromhex(prev_hash)[::-1],
+            prev_hdr,
             merkle_root,
             _uint32_le(ntime),
             _uint32_le(nbits),
@@ -262,14 +335,24 @@ def reconstruct_submit_candidate(
     if found_time.tzinfo is None or found_time.utcoffset() is None:
         raise ValueError("found_time must be timezone-aware")
 
-    coinbase = reconstruct_coinbase(job, extranonce1, submit.extranonce2)
+    enonce1 = extranonce1.lower()
+    enonce2 = submit.extranonce2.lower()
+    sv1_full_extranonce = enonce1 + enonce2
+    translated_try = try_derive_translated_full_extranonce_for_pool(enonce1, enonce2)
+    if translated_try is not None:
+        coinbase = reconstruct_coinbase_with_full_extranonce(job, translated_try)
+        full_extranonce_used_for_reconstruction = translated_try
+    else:
+        coinbase = reconstruct_coinbase(job, enonce1, enonce2)
+        full_extranonce_used_for_reconstruction = sv1_full_extranonce
     merkle_root = compute_merkle_root(coinbase, job.merkle_branches)
     header_version = merge_sv1_header_version(
         job.version, submit.version, job.version_rolling_mask
     )
+    prev_hash_header_hex = prev_hash_header_bytes_from_display(job.prev_hash).hex()
     header = build_block_header(
         version=header_version,
-        prev_hash=job.prev_hash,
+        prev_hash_display=job.prev_hash,
         merkle_root=merkle_root,
         ntime=submit.ntime,
         nbits=job.nbits,
@@ -279,6 +362,30 @@ def reconstruct_submit_candidate(
     target = decode_nbits_target(job.nbits)
     candidate_value = int(blockhash, 16)
     block_found = candidate_value <= target
+    coinbase_tx_hash = coinbase_tx_hash_hex(coinbase)
+    merkle_root_hex = merkle_root.hex()
+    header_hex = header.hex()
+    identity = worker_identity if worker_identity is not None else submit.worker_identity
+    reason: str | None = None if block_found else "candidate_hash_above_nbits_target"
+    forensic = dict(
+        submit_version=submit.version,
+        worker_identity=identity,
+        prev_hash_display=job.prev_hash,
+        prev_hash_header_hex=prev_hash_header_hex,
+        nbits=job.nbits,
+        ntime=submit.ntime,
+        nonce=submit.nonce,
+        sv1_extranonce1=enonce1,
+        sv1_extranonce2=enonce2,
+        sv1_full_extranonce=sv1_full_extranonce,
+        translated_full_extranonce=translated_try,
+        full_extranonce_used_for_reconstruction=full_extranonce_used_for_reconstruction,
+        coinbase_tx_hash=coinbase_tx_hash,
+        merkle_root=merkle_root_hex,
+        header_hex=header_hex,
+        meets_target=block_found,
+        reason=reason,
+    )
     if not block_found:
         return ReconstructionResult(
             block_found=False,
@@ -286,15 +393,16 @@ def reconstruct_submit_candidate(
             target=target,
             candidate_value=candidate_value,
             header_version=header_version,
+            **forensic,
         )
 
-    identity = worker_identity if worker_identity is not None else submit.worker_identity
     return ReconstructionResult(
         block_found=True,
         candidate_hash=blockhash,
         target=target,
         candidate_value=candidate_value,
         header_version=header_version,
+        **forensic,
         event=TranslatorCandidateBlockEvent(
             found_time=found_time,
             found_time_unix=int(found_time.timestamp()),

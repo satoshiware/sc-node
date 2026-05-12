@@ -102,6 +102,24 @@ def test_mining_submit_seen_and_reconstruction_logs_normal_submit(caplog) -> Non
     assert "version=" in rmsg
     assert "job_id=" in rmsg
     assert "submit_version=" in rmsg
+
+    for _k in (
+        "sv1_extranonce1=",
+        "sv1_extranonce2=",
+        "sv1_full_extranonce=",
+        "translated_full_extranonce=",
+        "full_extranonce_used_for_reconstruction=",
+        "coinbase_tx_hash=",
+        "merkle_root=",
+        "prev_hash_display=",
+        "prev_hash_header_hex=",
+        "header_hex=",
+        "version=",
+        "submit_version=",
+        "blockhash=",
+        "meets_target=",
+    ):
+        assert _k in rmsg
     assert "candidate_insert_attempted" in [getattr(r, "event", None) for r in caplog.records]
     assert "candidate_insert_succeeded" in [getattr(r, "event", None) for r in caplog.records]
     ok = _records_by_event(caplog, "candidate_insert_succeeded")
@@ -153,6 +171,24 @@ def test_candidate_reconstructed_non_target_meeting_submit(caplog) -> None:
     assert "meets_target=false" in rmsg
     assert "blockhash=" in rmsg
     assert "version=" in rmsg
+
+    for _k in (
+        "sv1_extranonce1=",
+        "sv1_extranonce2=",
+        "sv1_full_extranonce=",
+        "translated_full_extranonce=",
+        "full_extranonce_used_for_reconstruction=",
+        "coinbase_tx_hash=",
+        "merkle_root=",
+        "prev_hash_display=",
+        "prev_hash_header_hex=",
+        "header_hex=",
+        "version=",
+        "submit_version=",
+        "blockhash=",
+        "meets_target=",
+    ):
+        assert _k in rmsg
     assert repository.rows == []
 
 
@@ -199,6 +235,24 @@ def test_candidate_reconstructed_logs_merged_version_sc2_production_bits(caplog)
     assert "job_id=job-1" in msg
     assert "blockhash=" in msg
     assert "meets_target=" in msg
+
+    for _k in (
+        "sv1_extranonce1=",
+        "sv1_extranonce2=",
+        "sv1_full_extranonce=",
+        "translated_full_extranonce=",
+        "full_extranonce_used_for_reconstruction=",
+        "coinbase_tx_hash=",
+        "merkle_root=",
+        "prev_hash_display=",
+        "prev_hash_header_hex=",
+        "header_hex=",
+        "version=",
+        "submit_version=",
+        "blockhash=",
+        "meets_target=",
+    ):
+        assert _k in msg
 
 
 def test_mining_submit_candidate_event_triggers_insert_when_target_is_met() -> None:

@@ -8,12 +8,14 @@ from app.translator_candidate_reconstruction import (
     candidate_blockhash_from_header,
     compute_merkle_root,
     decode_nbits_target,
+    merge_sv1_header_version,
     parse_mining_authorize,
     parse_mining_notify,
     parse_mining_submit,
+    prev_hash_header_bytes_from_display,
     reconstruct_coinbase,
     reconstruct_submit_candidate,
-    merge_sv1_header_version,
+    try_derive_translated_full_extranonce_for_pool,
 )
 
 
@@ -85,7 +87,7 @@ def test_mining_submit_reconstructs_candidate_blockhash() -> None:
     merkle_root = compute_merkle_root(coinbase, job.merkle_branches)
     header = build_block_header(
         version=result.header_version,
-        prev_hash=job.prev_hash,
+        prev_hash_display=job.prev_hash,
         merkle_root=merkle_root,
         ntime=submit.ntime,
         nbits=job.nbits,
@@ -240,3 +242,64 @@ def test_reconstructed_event_includes_worker_identity_and_safe_fields() -> None:
         "accepted",
         "rejected",
     }.isdisjoint(event)
+
+
+def test_reconstruct_submit_candidate_populates_forensic_fields() -> None:
+    job = parse_mining_notify(_notify())
+    submit = parse_mining_submit(_submit())
+    assert job is not None and submit is not None
+    result = reconstruct_submit_candidate(
+        job=job,
+        submit=submit,
+        extranonce1=EXTRANONCE1,
+        found_time=FOUND_TIME,
+        worker_identity="w.test",
+    )
+    assert result.worker_identity == "w.test"
+    assert result.sv1_full_extranonce == (EXTRANONCE1 + submit.extranonce2).lower()
+    assert result.translated_full_extranonce is None
+    assert result.full_extranonce_used_for_reconstruction == result.sv1_full_extranonce
+    assert len(result.coinbase_tx_hash) == 64
+    assert len(result.merkle_root) == 64
+    assert result.prev_hash_display == job.prev_hash
+    assert (
+        result.prev_hash_header_hex
+        == prev_hash_header_bytes_from_display(job.prev_hash).hex()
+    )
+    assert len(result.header_hex) == 160
+    assert result.meets_target == result.block_found
+    assert result.reason is None or result.reason == "candidate_hash_above_nbits_target"
+
+
+def test_prev_hash_serializes_as_full_little_endian_in_header_may_2026_regression() -> None:
+    display = "00000000000000aa9a25ad4be42f99a00d3258a2989857f60db0810f975baae2"
+    expected_header_prev = (
+        "e2aa5b970f81b00df6579898a258320da0992fe44bad259aaa00000000000000"
+    )
+    assert prev_hash_header_bytes_from_display(display).hex() == expected_header_prev
+    header = build_block_header(
+        version="20040000",
+        prev_hash_display=display,
+        merkle_root=bytes(32),
+        ntime="6a03ae56",
+        nbits="01234567",
+        nonce="914a114f",
+    )
+    header_hex = header.hex()
+    version_prefix = int("20040000", 16).to_bytes(4, "little").hex()
+    assert header_hex.startswith(version_prefix)
+    assert header_hex[len(version_prefix) : len(version_prefix) + 64] == expected_header_prev
+
+
+def test_try_derive_translated_full_extranonce_production_may_2026() -> None:
+    sv1_e1 = "01000013000000000000000000000001"
+    sv1_e2 = "31010000"
+    expected = "00000000000000000000000131010000"
+    assert try_derive_translated_full_extranonce_for_pool(sv1_e1, sv1_e2) == expected
+    wrong_concat = (sv1_e1 + sv1_e2).lower()
+    assert wrong_concat != expected
+
+
+def test_try_derive_returns_none_for_classic_four_byte_subscribe() -> None:
+    assert try_derive_translated_full_extranonce_for_pool("01020304", "0a0b0c0d") is None
+
