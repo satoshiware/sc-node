@@ -1359,7 +1359,7 @@ def _build_postgres_work_delta_explanation(
     for work_row in sorted(user_work_rows, key=lambda r: str(r.get("username") or "")):
         username = str(work_row.get("username") or "")
         work_delta = Decimal(str(work_row.get("work_delta") or "0"))
-        baseline_work = previous_by_username.get(username, ZERO)
+        baseline_work = previous_by_username.get(username, Decimal("0"))
         current_work = baseline_work + work_delta
         per_user.append(
             {
