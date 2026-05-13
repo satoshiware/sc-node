@@ -2116,6 +2116,10 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
                 downstream_url=settings.translator_downstreams_url,
                 bearer_token=settings.translator_bearer_token,
                 raw_snapshot_writer=postgres_polling_repository,
+                sqlite_write_enabled=(
+                    bool(settings.sqlite_runtime_writes_enabled)
+                    and not bool(settings.postgres_primary_session_enabled)
+                ),
             )
             if reward_mode == "blocks":
                 interval_blocks, block_delta_details = _compute_interval_blocks_delta(
@@ -2138,6 +2142,10 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
                 session,
                 settings.translator_metrics_url,
                 raw_snapshot_writer=postgres_polling_repository,
+                sqlite_write_enabled=(
+                    bool(settings.sqlite_runtime_writes_enabled)
+                    and not bool(settings.postgres_primary_session_enabled)
+                ),
             )
 
         should_settle = force_settlement
