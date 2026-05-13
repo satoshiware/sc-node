@@ -197,6 +197,71 @@ def _build_allocation_rows(
     return rows
 
 
+def _persist_settlement_user_work_rows_postgres(
+    repository: PostgresLedgerRepository,
+    *,
+    settlement_id: int,
+    user_contributions: dict[str, UserContribution],
+    payout_fraction_by_username: dict[str, Decimal] | None,
+    created_at: datetime,
+) -> dict[str, dict[str, object]]:
+    users_by_username: dict[str, dict[str, object]] = {}
+    payout_fraction_by_username = payout_fraction_by_username or {}
+
+    for username, contribution in sorted(user_contributions.items(), key=lambda item: item[0]):
+        user = repository.upsert_user(username, created_at=created_at)
+        users_by_username[username] = user
+        repository.upsert_settlement_user_work(
+            settlement_id=settlement_id,
+            user_id=int(user["id"]),
+            share_delta=int(contribution.share_delta),
+            work_delta=contribution.work_delta,
+            payout_fraction=payout_fraction_by_username.get(username, ZERO),
+        )
+
+    return users_by_username
+
+
+def _set_settlement_window_state_postgres(
+    repository: PostgresLedgerRepository,
+    *,
+    settlement_id: int,
+    settlement_run_at: datetime,
+    work_window_start: datetime,
+    work_window_end: datetime,
+    maturity_offset_minutes: int,
+    status: str,
+    total_reward_sats: int,
+    total_work: Decimal,
+    total_shares: int,
+    completed_at: datetime | None = None,
+) -> dict[str, object]:
+    if hasattr(repository, "update_settlement_window_by_id"):
+        return repository.update_settlement_window_by_id(
+            settlement_id=settlement_id,
+            settlement_run_at=settlement_run_at,
+            maturity_offset_minutes=maturity_offset_minutes,
+            status=status,
+            total_reward_sats=total_reward_sats,
+            total_work=total_work,
+            total_shares=total_shares,
+            completed_at=completed_at,
+        )
+
+    # Compatibility fallback for lightweight test doubles.
+    return repository.upsert_settlement_window(
+        settlement_run_at=settlement_run_at,
+        work_window_start=work_window_start,
+        work_window_end=work_window_end,
+        maturity_offset_minutes=maturity_offset_minutes,
+        status=status,
+        total_reward_sats=total_reward_sats,
+        total_work=total_work,
+        total_shares=total_shares,
+        completed_at=completed_at,
+    )
+
+
 def run_settlement_postgres(
     repository: PostgresLedgerRepository,
     now: datetime,
@@ -281,7 +346,9 @@ def run_settlement_postgres(
     try:
         pool_reward = Decimal(str(reward_fetcher(period_start, period_end)))
     except PoolApiError:
-        repository.upsert_settlement_window(
+        _set_settlement_window_state_postgres(
+            repository,
+            settlement_id=int(settlement["id"]),
             settlement_run_at=now_aware,
             work_window_start=_as_utc_aware(period_start),
             work_window_end=_as_utc_aware(period_end),
@@ -314,7 +381,9 @@ def run_settlement_postgres(
     )
     total_shares, total_work = _summarize_contributions(user_contributions)
 
-    repository.upsert_settlement_window(
+    _set_settlement_window_state_postgres(
+        repository,
+        settlement_id=int(settlement["id"]),
         settlement_run_at=now_aware,
         work_window_start=_as_utc_aware(period_start),
         work_window_end=_as_utc_aware(period_end),
@@ -326,9 +395,18 @@ def run_settlement_postgres(
     )
 
     if defer_on_zero_reward and pool_reward <= ZERO:
+        _persist_settlement_user_work_rows_postgres(
+            repository,
+            settlement_id=int(settlement["id"]),
+            user_contributions=user_contributions,
+            payout_fraction_by_username=None,
+            created_at=now_aware,
+        )
         if use_work_accrual:
             _add_work_to_accrual_postgres(repository, user_contributions, now, decimals)
-        repository.upsert_settlement_window(
+        _set_settlement_window_state_postgres(
+            repository,
+            settlement_id=int(settlement["id"]),
             settlement_run_at=now_aware,
             work_window_start=_as_utc_aware(period_start),
             work_window_end=_as_utc_aware(period_end),
@@ -363,21 +441,24 @@ def run_settlement_postgres(
     settled_usernames: list[str] = []
 
     allocation_rows = _build_allocation_rows(user_contributions, distributable, decimals)
+    payout_fraction_by_username = {
+        str(row["username"]): _q(Decimal(str(row["payout_fraction"])), 18)
+        for row in allocation_rows
+    }
+    users_by_username = _persist_settlement_user_work_rows_postgres(
+        repository,
+        settlement_id=int(settlement["id"]),
+        user_contributions=user_contributions,
+        payout_fraction_by_username=payout_fraction_by_username,
+        created_at=now_aware,
+    )
     for row in allocation_rows:
         payout_amount = Decimal(str(row["payout_amount"]))
         if payout_amount <= ZERO:
             continue
 
         username = str(row["username"])
-        user = repository.upsert_user(username, created_at=now_aware)
-        
-        repository.upsert_settlement_user_work(
-            settlement_id=int(settlement["id"]),
-            user_id=int(user["id"]),
-            share_delta=int(user_contributions.get(username, UserContribution(username, 0, ZERO)).share_delta),
-            work_delta=user_contributions.get(username, UserContribution(username, 0, ZERO)).work_delta,
-            payout_fraction=_q(Decimal(str(row["payout_fraction"])), 18),
-        )
+        user = users_by_username[username]
         
         credit = repository.upsert_settlement_user_credit(
             settlement_id=int(settlement["id"]),
@@ -401,7 +482,9 @@ def run_settlement_postgres(
         updated_at=now_aware,
     )
 
-    repository.upsert_settlement_window(
+    _set_settlement_window_state_postgres(
+        repository,
+        settlement_id=int(settlement["id"]),
         settlement_run_at=now_aware,
         work_window_start=_as_utc_aware(period_start),
         work_window_end=_as_utc_aware(period_end),

@@ -20,6 +20,7 @@ from sqlalchemy import (
     UniqueConstraint,
     select,
     text,
+    update,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
@@ -555,6 +556,44 @@ class PostgresLedgerRepository:
         )
         return self._execute_returning_one(statement)
 
+    def update_settlement_window_by_id(
+        self,
+        *,
+        settlement_id: int,
+        sqlite_settlement_id: int | None = None,
+        settlement_run_at: datetime | None = None,
+        maturity_offset_minutes: int | None = None,
+        status: str | None = None,
+        total_reward_sats: int | None = None,
+        total_work: Decimal | int | str | None = None,
+        total_shares: int | None = None,
+        completed_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        _require_tzaware("settlement_run_at", settlement_run_at)
+        _require_tzaware("completed_at", completed_at)
+        values = _clean_values(
+            {
+                "sqlite_settlement_id": sqlite_settlement_id,
+                "status": status,
+                "settlement_run_at": settlement_run_at,
+                "maturity_offset_minutes": maturity_offset_minutes,
+                "total_reward_sats": total_reward_sats,
+                "total_work": _as_decimal(total_work) if total_work is not None else None,
+                "total_shares": total_shares,
+                "completed_at": completed_at,
+            }
+        )
+        if not values:
+            return self.get_settlement_window_by_id(settlement_id) or {}
+
+        statement = (
+            update(settlement_windows)
+            .where(settlement_windows.c.id == settlement_id)
+            .values(**values)
+            .returning(*settlement_windows.c)
+        )
+        return self._execute_returning_one(statement)
+
     def get_settlement_window_by_id(self, settlement_id: int) -> dict[str, Any] | None:
         return self._select_one_or_none(
             select(settlement_windows).where(settlement_windows.c.id == settlement_id)
@@ -800,6 +839,22 @@ class PostgresLedgerRepository:
             select(summary_snapshot)
             .order_by(summary_snapshot.c.contribution_window_end.desc(), summary_snapshot.c.id.desc())
             .limit(limit)
+        )
+
+    def get_summary_snapshot_by_settlement_id(self, settlement_id: int) -> dict[str, Any] | None:
+        return self._select_one_or_none(
+            select(summary_snapshot).where(summary_snapshot.c.settlement_id == settlement_id)
+        )
+
+    def list_summary_snapshot_miners(self, summary_snapshot_id: int) -> list[dict[str, Any]]:
+        return self._select_all(
+            select(summary_snapshot_miner)
+            .where(summary_snapshot_miner.c.summary_snapshot_id == summary_snapshot_id)
+            .order_by(
+                summary_snapshot_miner.c.worker_identity.asc(),
+                summary_snapshot_miner.c.channel_id.asc(),
+                summary_snapshot_miner.c.id.asc(),
+            )
         )
 
     def prune_raw_snapshot_windows(self, *, keep_latest_windows: int = 3) -> dict[str, Any]:
@@ -1224,6 +1279,13 @@ class PostgresLedgerRepository:
             row["user_credits"] = self.list_settlement_user_credits_with_users(settlement_id)
             row["user_work"] = self.list_settlement_user_work_with_users(settlement_id)
             row["settlement_blocks"] = self.list_settlement_blocks(settlement_id)
+            summary = self.get_summary_snapshot_by_settlement_id(settlement_id)
+            row["summary_snapshot"] = summary
+            row["summary_snapshot_miners"] = (
+                self.list_summary_snapshot_miners(int(summary["id"]))
+                if summary is not None
+                else []
+            )
         return rows
 
     def create_account_ledger_entry(

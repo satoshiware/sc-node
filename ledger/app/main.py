@@ -1252,8 +1252,80 @@ def _normalize_postgres_settlement_history_rows(
         credit_rows = list(row.get("user_credits") or [])
         user_work_rows = list(row.get("user_work") or [])
         block_rows = list(row.get("settlement_blocks") or [])
+        summary_snapshot = row.get("summary_snapshot") if isinstance(row.get("summary_snapshot"), dict) else {}
+        summary_snapshot_miners = list(row.get("summary_snapshot_miners") or [])
+        snapshot_alignment_miners: list[dict[str, object]] = []
+        snapshot_latest_state: list[dict[str, object]] = []
+        for miner in summary_snapshot_miners:
+            if not isinstance(miner, dict):
+                continue
+            identity = str(miner.get("worker_identity") or "")
+            channel_id = _to_int(miner.get("channel_id"))
+            snapshot_count = _to_int(miner.get("snapshot_count"))
+            shares_sum = _to_int(miner.get("accepted_shares_sum"))
+            work_sum = _to_decimal_str(miner.get("accepted_work_sum") or "0")
+            snapshot_alignment_miners.append(
+                {
+                    "identity": identity,
+                    "channel_id": channel_id,
+                    "snapshot_count": snapshot_count,
+                    "accepted_shares_sum": shares_sum,
+                    "accepted_work_sum": work_sum,
+                    "baseline_snapshot_id": None,
+                    "baseline_at": None,
+                    "current_snapshot_id": None,
+                    "current_at": None,
+                    "baseline_shares": None,
+                    "current_shares": None,
+                    "share_delta": shares_sum,
+                    "baseline_work": "0.00000000",
+                    "current_work": work_sum,
+                    "work_delta": work_sum,
+                    "reset_detected": False,
+                }
+            )
+            snapshot_latest_state.append(
+                {
+                    "identity": identity,
+                    "channel_id": channel_id,
+                    "latest_snapshot_id": None,
+                    "latest_at": None,
+                    "latest_shares": shares_sum,
+                    "latest_work": work_sum,
+                    "snapshot_count": snapshot_count,
+                }
+            )
         user_contributions = _postgres_history_user_contributions(user_work_rows)
         payout_user_breakdown = _postgres_history_payout_breakdown(credit_rows, user_work_rows)
+        payout_rows_raw = [
+            {
+                "username": str(credit.get("username") or ""),
+                "amount_btc": _sats_to_btc_str(credit.get("amount_sats")),
+                "status": credit.get("status"),
+                "idempotency_key": credit.get("idempotency_key"),
+            }
+            for credit in credit_rows
+        ]
+        credited_usernames = {
+            str(credit.get("username") or "")
+            for credit in credit_rows
+            if str(credit.get("username") or "")
+        }
+        unrewarded_users = [
+            {
+                "username": str(work.get("username") or ""),
+                "share_delta": _to_int(work.get("share_delta")),
+                "work_delta": _to_decimal_str(work.get("work_delta") or "0"),
+                "reason": "no_credit_row_for_settlement",
+            }
+            for work in user_work_rows
+            if str(work.get("username") or "")
+            and str(work.get("username") or "") not in credited_usernames
+            and (
+                _to_int(work.get("share_delta")) > 0
+                or Decimal(str(work.get("work_delta") or "0")) > 0
+            )
+        ]
         payout_count = len(credit_rows)
         settlement_id = _to_int(row.get("id"))
 
@@ -1302,7 +1374,7 @@ def _normalize_postgres_settlement_history_rows(
                 "user_count": len(credit_rows),
                 "payout_count": payout_count,
                 "payout_total_btc": _sats_to_btc_str(payout_total_sats),
-                "unrewarded_user_count": 0,
+                "unrewarded_user_count": len(unrewarded_users),
                 "interval_blocks": len(block_rows),
                 "computed_reward_btc": _sats_to_btc_str(row.get("total_reward_sats")),
                 "settlement_reward_btc": _sats_to_btc_str(row.get("total_reward_sats")),
@@ -1319,14 +1391,31 @@ def _normalize_postgres_settlement_history_rows(
                 "raw": {
                     "read_source": "postgres",
                     "settlement_window_id": _to_int(row.get("id")),
+                    "payout_rows": payout_rows_raw,
+                    "checks": {
+                        "unrewarded_user_count": len(unrewarded_users),
+                        "unrewarded_users": unrewarded_users,
+                    },
                     "snapshot_alignment": {
-                        "total_share_delta": _to_int(row.get("total_shares")),
-                        "total_work_delta": _to_decimal_str(row.get("total_work") or "0"),
-                        "miners": [],
-                        "latest_snapshot_state": [],
+                        "total_share_delta": _to_int(
+                            summary_snapshot.get("accepted_shares_sum", row.get("total_shares"))
+                            if isinstance(summary_snapshot, dict)
+                            else row.get("total_shares")
+                        ),
+                        "total_work_delta": _to_decimal_str(
+                            summary_snapshot.get("accepted_work_sum", row.get("total_work") or "0")
+                            if isinstance(summary_snapshot, dict)
+                            else row.get("total_work") or "0"
+                        ),
+                        "miners": snapshot_alignment_miners,
+                        "latest_snapshot_state": snapshot_latest_state,
                         "coverage": {
-                            "tracked_miners_total": len(user_work_rows),
-                            "snapshots_in_window": 0,
+                            "tracked_miners_total": len(snapshot_alignment_miners),
+                            "snapshots_in_window": _to_int(
+                                summary_snapshot.get("snapshot_count", 0)
+                                if isinstance(summary_snapshot, dict)
+                                else 0
+                            ),
                         },
                     },
                 },

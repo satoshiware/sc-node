@@ -297,3 +297,124 @@ class TestPostgresSettlementBasics:
 
         assert result.status == "blocked"
         assert repo.upsert_calls
+
+    def test_deferred_settlement_persists_user_work_rows(self, monkeypatch):
+        """Deferred Postgres settlements should still persist per-user work rows."""
+
+        class _FakeRepo:
+            def __init__(self):
+                self.user_work_calls = []
+                self.users = {}
+
+            def get_latest_settlement_window(self):
+                return None
+
+            def get_settlement_window_by_range(self, *, work_window_start, work_window_end):
+                _ = (work_window_start, work_window_end)
+                return None
+
+            def upsert_settlement_window(self, **kwargs):
+                return {"id": 1, **kwargs}
+
+            def upsert_user(self, username, created_at=None):
+                user = self.users.get(username)
+                if user is None:
+                    user = {"id": len(self.users) + 1, "username": username, "created_at": created_at}
+                    self.users[username] = user
+                return user
+
+            def upsert_settlement_user_work(self, **kwargs):
+                self.user_work_calls.append(kwargs)
+                return kwargs
+
+            def get_carry_state(self, *, bucket="default"):
+                return {"bucket": bucket, "carry_btc": Decimal("0")}
+
+        monkeypatch.setattr(
+            "app.postgres_settlement.compute_user_contribution_deltas_postgres",
+            lambda repo, start, end: {
+                "alice": UserContribution("alice", 100, Decimal("1000")),
+                "bob": UserContribution("bob", 60, Decimal("1618982")),
+            },
+        )
+
+        repo = _FakeRepo()
+        now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+
+        result = run_settlement_postgres(
+            repo,
+            now,
+            interval_minutes=10,
+            payout_decimals=8,
+            reward_fetcher=lambda _start, _end: Decimal("0"),
+            defer_on_zero_reward=True,
+            use_work_accrual=False,
+        )
+
+        assert result.status == "deferred"
+        assert len(repo.user_work_calls) == 2
+        assert {call["share_delta"] for call in repo.user_work_calls} == {100, 60}
+
+    def test_deferred_settlement_uses_update_by_id_after_initial_create(self, monkeypatch):
+        """Settlement state transitions should update by id to avoid repeated upsert insert attempts."""
+
+        class _FakeRepo:
+            def __init__(self):
+                self.upsert_calls = 0
+                self.update_calls = 0
+                self.user_work_calls = []
+                self.users = {}
+
+            def get_latest_settlement_window(self):
+                return None
+
+            def get_settlement_window_by_range(self, *, work_window_start, work_window_end):
+                _ = (work_window_start, work_window_end)
+                return None
+
+            def upsert_settlement_window(self, **kwargs):
+                self.upsert_calls += 1
+                return {"id": 77, **kwargs}
+
+            def update_settlement_window_by_id(self, **kwargs):
+                self.update_calls += 1
+                return {"id": kwargs["settlement_id"], **kwargs}
+
+            def upsert_user(self, username, created_at=None):
+                user = self.users.get(username)
+                if user is None:
+                    user = {"id": len(self.users) + 1, "username": username, "created_at": created_at}
+                    self.users[username] = user
+                return user
+
+            def upsert_settlement_user_work(self, **kwargs):
+                self.user_work_calls.append(kwargs)
+                return kwargs
+
+            def get_carry_state(self, *, bucket="default"):
+                return {"bucket": bucket, "carry_btc": Decimal("0")}
+
+        monkeypatch.setattr(
+            "app.postgres_settlement.compute_user_contribution_deltas_postgres",
+            lambda repo, start, end: {
+                "alice": UserContribution("alice", 100, Decimal("1000")),
+                "bob": UserContribution("bob", 60, Decimal("1618982")),
+            },
+        )
+
+        repo = _FakeRepo()
+        now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+
+        result = run_settlement_postgres(
+            repo,
+            now,
+            interval_minutes=10,
+            payout_decimals=8,
+            reward_fetcher=lambda _start, _end: Decimal("0"),
+            defer_on_zero_reward=True,
+            use_work_accrual=False,
+        )
+
+        assert result.status == "deferred"
+        assert repo.upsert_calls == 1
+        assert repo.update_calls >= 2
