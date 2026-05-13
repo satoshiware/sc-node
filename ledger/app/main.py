@@ -1294,13 +1294,23 @@ def _normalize_postgres_settlement_history_rows(
                 "block_rows": _postgres_history_block_rows(block_rows),
                 "payout_user_breakdown": payout_user_breakdown,
                 "interval_ratio_rows": _build_interval_ratio_rows(user_contributions),
-                "work_delta_explanation": _build_work_delta_explanation({}),
+                "work_delta_explanation": _build_postgres_work_delta_explanation(user_work_rows),
                 "last_payout_settlement_id": previous_payout_settlement_id,
                 "last_payout_contributions": previous_payout_contributions,
                 "payout_vs_last_payout": previous_payout_comparison,
                 "raw": {
                     "read_source": "postgres",
                     "settlement_window_id": _to_int(row.get("id")),
+                    "snapshot_alignment": {
+                        "total_share_delta": _to_int(row.get("total_shares")),
+                        "total_work_delta": _to_decimal_str(row.get("total_work") or "0"),
+                        "miners": [],
+                        "latest_snapshot_state": [],
+                        "coverage": {
+                            "tracked_miners_total": len(user_work_rows),
+                            "snapshots_in_window": 0,
+                        },
+                    },
                 },
             }
         )
@@ -1313,18 +1323,56 @@ def _normalize_postgres_settlement_history_rows(
     return normalized
 
 
+def _build_postgres_work_delta_explanation(user_work_rows: list[dict[str, object]]) -> dict[str, object]:
+    """Build work-delta explanation from settlement_user_work rows for the Postgres authoritative path.
+
+    The audit-log path has per-snapshot baseline/current counters; the Postgres history path
+    only stores the aggregated delta per user.  We surface what we have.
+    """
+    per_user: list[dict[str, object]] = []
+    for work_row in sorted(user_work_rows, key=lambda r: str(r.get("username") or "")):
+        work_delta = Decimal(str(work_row.get("work_delta") or "0"))
+        per_user.append(
+            {
+                "username": str(work_row.get("username") or ""),
+                "identity_count": 1,
+                "baseline_work_sum": "0.00000000",
+                "current_work_sum": _to_decimal_str(work_delta),
+                "work_delta_sum": _to_decimal_str(work_delta),
+                "formula": f"(aggregated from settlement_user_work) = {_to_decimal_str(work_delta)}",
+            }
+        )
+    return {
+        "source_metric": "accepted_work_total",
+        "description": (
+            "Work delta read from settlement_user_work table (Postgres authoritative path). "
+            "Per-snapshot baseline/current counters are only available in the audit log."
+        ),
+        "reset_rule": "negative steps are treated as counter resets and contribute 0",
+        "per_identity": [],
+        "per_user": per_user,
+    }
+
+
 def _read_postgres_settlement_history(*, limit: int) -> dict:
     rows = _postgres_settlement_history_rows(limit)
     normalized = _normalize_postgres_settlement_history_rows(rows)
     settings = load_settings()
+    audit_payload = read_recent_audit_entries(settings.payout_audit_log_path, limit=500)
+    scheduler_events: list[dict[str, object]] = [
+        entry
+        for entry in audit_payload.get("entries", [])
+        if entry.get("event_type") and "attempt_id" not in entry
+    ]
+    scheduler_events = scheduler_events[-20:]
     return {
-        "log_path": None,
+        "log_path": settings.payout_audit_log_path,
         "exists": True,
         "entry_count": len(normalized),
         "invalid_line_count": 0,
         "scheduler_enabled": bool(settings.scheduler_enabled),
         "scheduler_interval_seconds": int(settings.scheduler_interval_seconds),
-        "scheduler_events": [],
+        "scheduler_events": scheduler_events,
         "settlements": normalized,
     }
 
