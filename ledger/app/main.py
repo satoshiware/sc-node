@@ -38,6 +38,7 @@ from app.pool_client import PoolApiError, fetch_block_rewards_by_hashes, fetch_b
 from app.postgres_db import make_postgres_engine, make_postgres_session_factory
 from app.postgres_delta import compute_user_contribution_deltas_postgres
 from app.postgres_repositories import PostgresLedgerRepository
+from app.postgres_sender import process_payout_events_postgres
 from app.postgres_settlement import run_settlement_postgres
 from app.postgres_shadow_compare import (
     audit_postgres_shadow_settlements,
@@ -484,10 +485,25 @@ def _run_scheduled_cycle() -> None:
 
 def _new_session() -> Session:
     settings = load_settings()
+    if settings.postgres_primary_session_enabled:
+        try:
+            engine = make_postgres_engine()
+            session_factory = make_postgres_session_factory(engine)
+            return session_factory()
+        except Exception:
+            if not settings.postgres_primary_session_fallback_to_sqlite:
+                raise
+
+    if settings.sqlite_retirement_mode_enabled:
+        raise RuntimeError(
+            "SQLite retirement mode is enabled but Postgres primary session is unavailable. "
+            "Set POSTGRES_PRIMARY_SESSION_ENABLED=true and POSTGRES_PRIMARY_SESSION_FALLBACK_TO_SQLITE=false."
+        )
+
     init_db(settings.db_path)
     engine = make_engine(settings.db_path)
-    SessionFactory = make_session_factory(engine)
-    return SessionFactory()
+    session_factory = make_session_factory(engine)
+    return session_factory()
 
 
 def _to_decimal_str(value: object) -> str:
@@ -966,6 +982,12 @@ def _read_sqlite_settlement_history(settings, session: Session, *, limit: int) -
                 previous_payout_contributions,
             )
 
+        interval_blocks = int(
+            block_reward.get("interval_blocks")
+            or block_reward.get("matured_hash_count")
+            or 0
+        )
+
         normalized.append(
             {
                 "attempt_id": attempt.get("attempt_id"),
@@ -987,7 +1009,7 @@ def _read_sqlite_settlement_history(settings, session: Session, *, limit: int) -
                 "payout_count": payout_count,
                 "payout_total_btc": _to_decimal_str(_sum_payout_amount(payout_rows)),
                 "unrewarded_user_count": checks.get("unrewarded_user_count", 0),
-                "interval_blocks": int(block_reward.get("interval_blocks", 0) or 0),
+                "interval_blocks": interval_blocks,
                 "computed_reward_btc": block_reward.get("computed_reward_btc", "0.00000000"),
                 "settlement_reward_btc": block_reward.get("settlement_reward_btc", settlement.get("pool_reward_btc")),
                 "block_rows": block_rows,
@@ -1863,8 +1885,13 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
     attempt_id = str(uuid.uuid4())
     postgres_shadow_write: dict[str, object] | None = None
     postgres_polling_repository: PostgresLedgerRepository | None = None
+    requires_runtime_postgres_repository = (
+        settings.postgres_ledger_shadow_write_enabled
+        or settings.postgres_settlement_engine_enabled
+        or settings.postgres_sender_enabled
+    )
 
-    if settings.postgres_ledger_shadow_write_enabled:
+    if requires_runtime_postgres_repository:
         try:
             postgres_polling_repository = PostgresLedgerRepository(
                 make_postgres_session_factory(make_postgres_engine())
@@ -1878,6 +1905,10 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
                     "traceback": traceback.format_exc(),
                 },
             )
+            if settings.sqlite_retirement_mode_enabled:
+                raise RuntimeError(
+                    "SQLite retirement mode is enabled and runtime Postgres repository initialization failed."
+                ) from exc
 
     with _new_session() as session:
         attempt_time = datetime.now(UTC).replace(tzinfo=None)
@@ -1938,7 +1969,24 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
             )
 
         if not should_settle:
-            sender_stats = process_payout_events(session, dry_run=settings.dry_run)
+            if settings.postgres_sender_enabled:
+                if postgres_polling_repository is None:
+                    if settings.sqlite_retirement_mode_enabled:
+                        raise RuntimeError(
+                            "SQLite retirement mode is enabled but Postgres sender is unavailable."
+                        )
+                    sender_stats = process_payout_events(session, dry_run=settings.dry_run)
+                else:
+                    sender_stats = process_payout_events_postgres(
+                        postgres_polling_repository,
+                        dry_run=settings.dry_run,
+                    )
+            else:
+                if settings.sqlite_retirement_mode_enabled:
+                    raise RuntimeError(
+                        "SQLite retirement mode is enabled; set POSTGRES_SENDER_ENABLED=true."
+                    )
+                sender_stats = process_payout_events(session, dry_run=settings.dry_run)
             response: dict[str, object] = {
                 "snapshots_created": snapshots_created,
                 "settlement": None,
@@ -2080,6 +2128,7 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
                 "matured_window_end": matured_end.isoformat(),
                 "fetched_block_count": len(fetched_block_rows),
                 "inserted_block_count": int(inserted_blocks),
+                "interval_blocks": len(current_matured_hashes),
                 "matured_hash_count": len([row for row in matured_rows if row.blockhash]),
                 "retry_hash_count": len(selected_matured_hashes),
                 "retry_only_hash_count": len(retry_hashes),
@@ -2105,40 +2154,53 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
             settlement_kwargs["work_window_end"] = matured_end
 
         settlement_engine = "sqlite"
-        if settings.postgres_settlement_engine_enabled and postgres_polling_repository is not None:
-            try:
-                settlement_result = run_settlement_postgres(
-                    postgres_polling_repository,
-                    attempt_time,
-                    **settlement_kwargs,
-                )
-                settlement_engine = "postgres"
-            except Exception as exc:
-                settlement_engine = "sqlite_fallback"
-                _write_scheduler_event(
-                    "postgres_settlement_engine_failed",
-                    {
-                        "error": str(exc),
-                        "traceback": traceback.format_exc(),
-                    },
-                )
+        if settings.postgres_settlement_engine_enabled:
+            if postgres_polling_repository is None:
+                if settings.sqlite_retirement_mode_enabled:
+                    raise RuntimeError(
+                        "SQLite retirement mode is enabled but Postgres settlement engine repository is unavailable."
+                    )
                 settlement_result = run_settlement(
                     session,
                     attempt_time,
                     **settlement_kwargs,
                 )
+            else:
+                try:
+                    settlement_result = run_settlement_postgres(
+                        postgres_polling_repository,
+                        attempt_time,
+                        **settlement_kwargs,
+                    )
+                    settlement_engine = "postgres"
+                except Exception as exc:
+                    if settings.sqlite_retirement_mode_enabled:
+                        raise RuntimeError(
+                            "Postgres settlement engine failed while SQLite retirement mode is enabled."
+                        ) from exc
+                    settlement_engine = "sqlite_fallback"
+                    _write_scheduler_event(
+                        "postgres_settlement_engine_failed",
+                        {
+                            "error": str(exc),
+                            "traceback": traceback.format_exc(),
+                        },
+                    )
+                    settlement_result = run_settlement(
+                        session,
+                        attempt_time,
+                        **settlement_kwargs,
+                    )
         else:
+            if settings.sqlite_retirement_mode_enabled:
+                raise RuntimeError(
+                    "SQLite retirement mode is enabled; set POSTGRES_SETTLEMENT_ENGINE_ENABLED=true."
+                )
             settlement_result = run_settlement(
                 session,
                 attempt_time,
                 **settlement_kwargs,
             )
-
-        if settings.enable_settlement_replay_hook:
-            try:
-                run_settlement_replay_hook(session, settlement_result)
-            except Exception:
-                pass
 
         if selected_snapshot_block_ids:
             rows_to_link = session.execute(
@@ -2150,7 +2212,24 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
                 row.updated_at = now_utc_naive
             session.flush()
 
-        sender_stats = process_payout_events(session, dry_run=settings.dry_run)
+        if settings.postgres_sender_enabled:
+            if postgres_polling_repository is None:
+                if settings.sqlite_retirement_mode_enabled:
+                    raise RuntimeError(
+                        "SQLite retirement mode is enabled but Postgres sender is unavailable."
+                    )
+                sender_stats = process_payout_events(session, dry_run=settings.dry_run)
+            else:
+                sender_stats = process_payout_events_postgres(
+                    postgres_polling_repository,
+                    dry_run=settings.dry_run,
+                )
+        else:
+            if settings.sqlite_retirement_mode_enabled:
+                raise RuntimeError(
+                    "SQLite retirement mode is enabled; set POSTGRES_SENDER_ENABLED=true."
+                )
+            sender_stats = process_payout_events(session, dry_run=settings.dry_run)
 
         audit_event = build_payout_audit_event(
             session,
@@ -2220,6 +2299,12 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
                 "settlement_id": settlement_result.settlement_id,
                 "note": "Postgres settlement already persisted to Postgres.",
             }
+
+        if settings.enable_settlement_replay_hook:
+            try:
+                run_settlement_replay_hook(session, settlement_result)
+            except Exception:
+                pass
 
     response = {
         "snapshots_created": snapshots_created,
