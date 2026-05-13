@@ -943,7 +943,8 @@ def _compute_interval_blocks_delta(
 
     details: list[dict[str, int | bool]] = []
     interval_blocks = 0
-    now = datetime.now(UTC).replace(tzinfo=None)
+    now_aware = datetime.now(UTC)
+    now_naive = now_aware.replace(tzinfo=None)
 
     for channel_id, current in sorted(current_blocks_found_by_channel.items(), key=lambda item: item[0]):
         previous = int(previous_by_channel.get(channel_id, 0))
@@ -957,14 +958,14 @@ def _compute_interval_blocks_delta(
                 state = postgres_repository.upsert_block_counter_state(
                     channel_id=channel_id,
                     last_blocks_found_total=current,
-                    updated_at=now,
+                    updated_at=now_aware,
                 )
                 state_by_channel[channel_id] = state
             else:
                 state = BlockCounterState(
                     channel_id=channel_id,
                     last_blocks_found_total=current,
-                    updated_at=now,
+                    updated_at=now_naive,
                 )
                 session.add(state)
                 state_by_channel[channel_id] = state
@@ -973,11 +974,11 @@ def _compute_interval_blocks_delta(
                 postgres_repository.upsert_block_counter_state(
                     channel_id=channel_id,
                     last_blocks_found_total=current,
-                    updated_at=now,
+                    updated_at=now_aware,
                 )
             else:
                 state.last_blocks_found_total = current
-                state.updated_at = now
+                state.updated_at = now_naive
 
         details.append(
             {
