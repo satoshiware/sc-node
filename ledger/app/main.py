@@ -1281,20 +1281,6 @@ def _normalize_postgres_settlement_history_rows(
             contribution_window_start = work_window_start
             contribution_window_end = work_window_end
         payout_total_sats = sum(_to_int(credit.get("amount_sats")) for credit in credit_rows)
-        work_delta_explanation = _build_postgres_work_delta_explanation(
-            user_work_rows,
-            previous_cycle_contributions,
-        )
-        snapshot_miners = list(work_delta_explanation.get("per_identity") or [])
-        latest_snapshot_state = [
-            {
-                "identity": row.get("identity"),
-                "channel_id": row.get("channel_id"),
-                "latest_work": row.get("current_work"),
-            }
-            for row in snapshot_miners
-        ]
-        unrewarded_users = _find_unrewarded_users(user_contributions, payout_user_breakdown)
 
         normalized.append(
             {
@@ -1323,30 +1309,24 @@ def _normalize_postgres_settlement_history_rows(
                 "block_rows": _postgres_history_block_rows(block_rows),
                 "payout_user_breakdown": payout_user_breakdown,
                 "interval_ratio_rows": _build_interval_ratio_rows(user_contributions),
-                "work_delta_explanation": work_delta_explanation,
+                "work_delta_explanation": _build_postgres_work_delta_explanation(
+                    user_work_rows,
+                    previous_cycle_contributions,
+                ),
                 "last_payout_settlement_id": previous_payout_settlement_id,
                 "last_payout_contributions": previous_payout_contributions,
                 "payout_vs_last_payout": previous_payout_comparison,
                 "raw": {
                     "read_source": "postgres",
                     "settlement_window_id": _to_int(row.get("id")),
-                    "payout_rows": payout_user_breakdown,
-                    "checks": {
-                        "unrewarded_users": unrewarded_users,
-                    },
-                    "block_reward": {
-                        "matured_window_start": contribution_window_start,
-                        "matured_window_end": contribution_window_end,
-                        "channels": [],
-                    },
                     "snapshot_alignment": {
                         "total_share_delta": _to_int(row.get("total_shares")),
                         "total_work_delta": _to_decimal_str(row.get("total_work") or "0"),
-                        "miners": snapshot_miners,
-                        "latest_snapshot_state": latest_snapshot_state,
+                        "miners": [],
+                        "latest_snapshot_state": [],
                         "coverage": {
-                            "tracked_miners_total": len(snapshot_miners),
-                            "snapshots_in_window": len(snapshot_miners),
+                            "tracked_miners_total": len(user_work_rows),
+                            "snapshots_in_window": 0,
                         },
                     },
                 },
@@ -1376,27 +1356,11 @@ def _build_postgres_work_delta_explanation(
         for row in previous_cycle_contributions
     }
     per_user: list[dict[str, object]] = []
-    per_identity: list[dict[str, object]] = []
     for work_row in sorted(user_work_rows, key=lambda r: str(r.get("username") or "")):
         username = str(work_row.get("username") or "")
         work_delta = Decimal(str(work_row.get("work_delta") or "0"))
         baseline_work = previous_by_username.get(username, Decimal("0"))
         current_work = baseline_work + work_delta
-        per_identity.append(
-            {
-                "username": username,
-                "identity": username,
-                "channel_id": None,
-                "baseline_work": _to_decimal_str(baseline_work),
-                "current_work": _to_decimal_str(current_work),
-                "work_delta": _to_decimal_str(work_delta),
-                "formula": (
-                    f"{_to_decimal_str(current_work)} - "
-                    f"{_to_decimal_str(baseline_work)} = {_to_decimal_str(work_delta)}"
-                ),
-                "reset_detected": False,
-            }
-        )
         per_user.append(
             {
                 "username": username,
@@ -1417,7 +1381,7 @@ def _build_postgres_work_delta_explanation(
             "Per-snapshot baseline/current counters are only available in the audit log."
         ),
         "reset_rule": "negative steps are treated as counter resets and contribute 0",
-        "per_identity": per_identity,
+        "per_identity": [],
         "per_user": per_user,
     }
 
