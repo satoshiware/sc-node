@@ -1246,6 +1246,7 @@ def _normalize_postgres_settlement_history_rows(
     normalized: list[dict[str, object]] = []
     previous_payout_settlement_id: int | None = None
     previous_payout_contributions: list[dict[str, object]] = []
+    previous_cycle_contributions: list[dict[str, object]] = []
 
     for row in sorted(rows, key=lambda item: str(item.get("settlement_run_at") or ""), reverse=False):
         credit_rows = list(row.get("user_credits") or [])
@@ -1266,6 +1267,19 @@ def _normalize_postgres_settlement_history_rows(
         attempted_at = row["settlement_run_at"].isoformat() if row.get("settlement_run_at") else None
         work_window_start = row["work_window_start"].isoformat() if row.get("work_window_start") else None
         work_window_end = row["work_window_end"].isoformat() if row.get("work_window_end") else None
+        work_window_start_dt = row.get("work_window_start")
+        work_window_end_dt = row.get("work_window_end")
+        maturity_offset_minutes = max(0, _to_int(row.get("maturity_offset_minutes")))
+        if (
+            maturity_offset_minutes > 0
+            and isinstance(work_window_start_dt, datetime)
+            and isinstance(work_window_end_dt, datetime)
+        ):
+            contribution_window_start = (work_window_start_dt - timedelta(minutes=maturity_offset_minutes)).isoformat()
+            contribution_window_end = (work_window_end_dt - timedelta(minutes=maturity_offset_minutes)).isoformat()
+        else:
+            contribution_window_start = work_window_start
+            contribution_window_end = work_window_end
         payout_total_sats = sum(_to_int(credit.get("amount_sats")) for credit in credit_rows)
 
         normalized.append(
@@ -1274,8 +1288,8 @@ def _normalize_postgres_settlement_history_rows(
                 "attempted_at": attempted_at,
                 "period_start": work_window_start,
                 "period_end": work_window_end,
-                "contribution_window_start": work_window_start,
-                "contribution_window_end": work_window_end,
+                "contribution_window_start": contribution_window_start,
+                "contribution_window_end": contribution_window_end,
                 "settlement_id": settlement_id,
                 "status": row.get("status"),
                 "reward_mode": None,
@@ -1295,7 +1309,10 @@ def _normalize_postgres_settlement_history_rows(
                 "block_rows": _postgres_history_block_rows(block_rows),
                 "payout_user_breakdown": payout_user_breakdown,
                 "interval_ratio_rows": _build_interval_ratio_rows(user_contributions),
-                "work_delta_explanation": _build_postgres_work_delta_explanation(user_work_rows),
+                "work_delta_explanation": _build_postgres_work_delta_explanation(
+                    user_work_rows,
+                    previous_cycle_contributions,
+                ),
                 "last_payout_settlement_id": previous_payout_settlement_id,
                 "last_payout_contributions": previous_payout_contributions,
                 "payout_vs_last_payout": previous_payout_comparison,
@@ -1319,28 +1336,42 @@ def _normalize_postgres_settlement_history_rows(
         if payout_count > 0:
             previous_payout_settlement_id = settlement_id
             previous_payout_contributions = list(user_contributions)
+        previous_cycle_contributions = list(user_contributions)
 
     normalized.sort(key=lambda item: str(item.get("attempted_at") or ""), reverse=True)
     return normalized
 
 
-def _build_postgres_work_delta_explanation(user_work_rows: list[dict[str, object]]) -> dict[str, object]:
+def _build_postgres_work_delta_explanation(
+    user_work_rows: list[dict[str, object]],
+    previous_cycle_contributions: list[dict[str, object]],
+) -> dict[str, object]:
     """Build work-delta explanation from settlement_user_work rows for the Postgres authoritative path.
 
     The audit-log path has per-snapshot baseline/current counters; the Postgres history path
     only stores the aggregated delta per user.  We surface what we have.
     """
+    previous_by_username = {
+        str(row.get("username") or ""): Decimal(str(row.get("work_delta") or "0"))
+        for row in previous_cycle_contributions
+    }
     per_user: list[dict[str, object]] = []
     for work_row in sorted(user_work_rows, key=lambda r: str(r.get("username") or "")):
+        username = str(work_row.get("username") or "")
         work_delta = Decimal(str(work_row.get("work_delta") or "0"))
+        baseline_work = previous_by_username.get(username, ZERO)
+        current_work = baseline_work + work_delta
         per_user.append(
             {
-                "username": str(work_row.get("username") or ""),
+                "username": username,
                 "identity_count": 1,
-                "baseline_work_sum": "0.00000000",
-                "current_work_sum": _to_decimal_str(work_delta),
+                "baseline_work_sum": _to_decimal_str(baseline_work),
+                "current_work_sum": _to_decimal_str(current_work),
                 "work_delta_sum": _to_decimal_str(work_delta),
-                "formula": f"(aggregated from settlement_user_work) = {_to_decimal_str(work_delta)}",
+                "formula": (
+                    f"{_to_decimal_str(current_work)} - "
+                    f"{_to_decimal_str(baseline_work)} = {_to_decimal_str(work_delta)}"
+                ),
             }
         )
     return {

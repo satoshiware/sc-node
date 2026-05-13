@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 import json
 from pathlib import Path
@@ -20,6 +20,12 @@ from app.postgres_repositories import PostgresLedgerRepository
 from app.runtime_cutover import should_fail_closed_on_postgres_primary
 
 ZERO = Decimal("0")
+
+
+def _as_utc_aware(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _to_decimal(value: object | None) -> Decimal:
@@ -42,12 +48,14 @@ def _build_snapshot_alignment(
     # Try Postgres path first if primary session enabled
     if getattr(settings, "postgres_primary_session_enabled", False):
         try:
+            pg_period_start = _as_utc_aware(period_start)
+            pg_period_end = _as_utc_aware(period_end)
             postgres_repo = PostgresLedgerRepository(
                 make_postgres_session_factory(make_postgres_engine())
             )
-            rows = postgres_repo.list_raw_miner_snapshot_counters_up_to(period_end=period_end)
+            rows = postgres_repo.list_raw_miner_snapshot_counters_up_to(period_end=pg_period_end)
             if rows:
-                return _build_snapshot_alignment_from_rows(rows, period_start, period_end)
+                return _build_snapshot_alignment_from_rows(rows, pg_period_start, pg_period_end)
         except Exception:
             if should_fail_closed_on_postgres_primary(
                 postgres_primary_session_enabled=settings.postgres_primary_session_enabled,
@@ -284,8 +292,8 @@ def _build_user_contributions(
             postgres_repo = PostgresLedgerRepository(
                 make_postgres_session_factory(make_postgres_engine())
             )
-            _start = period_start if period_start.tzinfo is not None else period_start.replace(tzinfo=__import__("datetime").timezone.utc)
-            _end = period_end if period_end.tzinfo is not None else period_end.replace(tzinfo=__import__("datetime").timezone.utc)
+            _start = _as_utc_aware(period_start)
+            _end = _as_utc_aware(period_end)
             contributions = compute_user_contribution_deltas_postgres(postgres_repo, _start, _end)
             return [
                 {
