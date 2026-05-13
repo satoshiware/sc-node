@@ -219,6 +219,7 @@ def run_settlement_postgres(
     decimals = payout_decimals or settings.payout_decimals
     now_aware = _as_utc_aware(now)
     work_window_end_aware = _as_utc_aware(work_window_end) if work_window_end is not None else None
+    configured_maturity_offset = max(1, int(getattr(settings, "maturity_window_minutes", 1) or 1))
 
     latest_settlement = repository.get_latest_settlement_window()
 
@@ -263,11 +264,14 @@ def run_settlement_postgres(
             carry_btc=Decimal(str(carry.get("carry_btc") or 0)),
         )
 
+    derived_maturity_offset = int((period_end - (work_window_end_aware or period_end)).total_seconds() // 60)
+    maturity_offset_minutes = derived_maturity_offset if derived_maturity_offset > 0 else configured_maturity_offset
+
     settlement = repository.upsert_settlement_window(
         settlement_run_at=now_aware,
         work_window_start=_as_utc_aware(period_start),
         work_window_end=_as_utc_aware(period_end),
-        maturity_offset_minutes=max(0, int((period_end - (work_window_end_aware or period_end)).total_seconds() // 60)),
+        maturity_offset_minutes=maturity_offset_minutes,
         status="pending",
         total_reward_sats=0,
         total_work=ZERO,
@@ -281,7 +285,7 @@ def run_settlement_postgres(
             settlement_run_at=now_aware,
             work_window_start=_as_utc_aware(period_start),
             work_window_end=_as_utc_aware(period_end),
-            maturity_offset_minutes=max(0, int((period_end - (work_window_end_aware or period_end)).total_seconds() // 60)),
+            maturity_offset_minutes=maturity_offset_minutes,
             status="blocked",
             total_reward_sats=0,
             total_work=ZERO,
@@ -314,7 +318,7 @@ def run_settlement_postgres(
         settlement_run_at=now_aware,
         work_window_start=_as_utc_aware(period_start),
         work_window_end=_as_utc_aware(period_end),
-        maturity_offset_minutes=max(0, int((period_end - (work_window_end_aware or period_end)).total_seconds() // 60)),
+        maturity_offset_minutes=maturity_offset_minutes,
         status="pending",
         total_reward_sats=int(pool_reward * Decimal("100000000")),
         total_work=_q(total_work, decimals),
@@ -328,7 +332,7 @@ def run_settlement_postgres(
             settlement_run_at=now_aware,
             work_window_start=_as_utc_aware(period_start),
             work_window_end=_as_utc_aware(period_end),
-            maturity_offset_minutes=max(0, int((period_end - (work_window_end_aware or period_end)).total_seconds() // 60)),
+            maturity_offset_minutes=maturity_offset_minutes,
             status="deferred",
             total_reward_sats=0,
             total_work=_q(total_work, decimals),
@@ -401,7 +405,7 @@ def run_settlement_postgres(
         settlement_run_at=now_aware,
         work_window_start=_as_utc_aware(period_start),
         work_window_end=_as_utc_aware(period_end),
-        maturity_offset_minutes=max(0, int((period_end - (work_window_end_aware or period_end)).total_seconds() // 60)),
+        maturity_offset_minutes=maturity_offset_minutes,
         status="completed",
         total_reward_sats=int(pool_reward * Decimal("100000000")),
         total_work=_q(total_work, decimals),
