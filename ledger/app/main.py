@@ -2040,17 +2040,6 @@ def run_settlement_cycle() -> dict:
 def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
     settings = load_settings()
     reward_mode = _normalize_reward_mode(settings.reward_mode)
-    if settings.sqlite_retirement_mode_enabled and settings.postgres_primary_session_enabled:
-        if reward_mode == "blocks":
-            raise RuntimeError(
-                "SQLite retirement mode with Postgres primary session does not support REWARD_MODE=blocks yet. "
-                "Set REWARD_MODE=manual or disable retirement mode until block counter state is ported."
-            )
-        if settings.enable_block_event_rewards:
-            raise RuntimeError(
-                "SQLite retirement mode with Postgres primary session does not support ENABLE_BLOCK_EVENT_REWARDS yet. "
-                "Disable block-event rewards or disable retirement mode until snapshot_block flow is ported."
-            )
     block_reward_btc = Decimal(str(settings.block_reward_btc or "1.87500000"))
     attempt_id = str(uuid.uuid4())
     postgres_shadow_write: dict[str, object] | None = None
