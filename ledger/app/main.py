@@ -6,7 +6,7 @@ import os
 import traceback
 import uuid
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -33,11 +33,13 @@ from app.hooks import (
 from app.init_db import init_db
 from app.mapping import parse_identity
 from app.models import BlockCounterState, PayoutEvent, Settlement, SnapshotBlock, User, UserPayout
-from app.poller import poll_channels_once_with_blocks, poll_metrics_once, upsert_snapshot_blocks
+from app.poller import poll_channels_once_with_blocks, poll_metrics_once, upsert_snapshot_blocks, upsert_blocks_found_postgres
 from app.pool_client import PoolApiError, fetch_block_rewards_by_hashes, fetch_blocks_found_in_window
 from app.postgres_db import make_postgres_engine, make_postgres_session_factory
 from app.postgres_delta import compute_user_contribution_deltas_postgres
+from app.postgres_read_payloads import build_latest_settlement_payload, build_service_metrics_payload
 from app.postgres_repositories import PostgresLedgerRepository
+from app.runtime_cutover import should_fail_closed_on_postgres_primary
 from app.postgres_sender import process_payout_events_postgres
 from app.postgres_settlement import run_settlement_postgres
 from app.postgres_shadow_compare import (
@@ -55,12 +57,6 @@ _SERVICE_STARTED_AT: datetime | None = None
 _SATS_PER_BTC = Decimal("100000000")
 POSTGRES_READ_ENDPOINT_SETTLEMENT_HISTORY = "settlement_history"
 POSTGRES_READ_ENDPOINT_SETTLEMENT_DETAIL = "settlement_detail"
-POSTGRES_READ_ENDPOINTS_REQUIRING_PUBLIC_SETTLEMENT_ID = frozenset(
-    {
-        POSTGRES_READ_ENDPOINT_SETTLEMENT_HISTORY,
-        POSTGRES_READ_ENDPOINT_SETTLEMENT_DETAIL,
-    }
-)
 POSTGRES_CANDIDATE_READ_MODES = frozenset(
     {
         POSTGRES_LEDGER_READ_MODE_SHADOW_CANDIDATE,
@@ -127,6 +123,33 @@ def _load_block_rows_by_settlement(session: Session, settlement_ids: list[int]) 
     if not settlement_ids:
         return {}
 
+    settings = load_settings()
+    if getattr(settings, "postgres_primary_session_enabled", False):
+        try:
+            postgres_repo = PostgresLedgerRepository(
+                make_postgres_session_factory(make_postgres_engine())
+            )
+            result = postgres_repo.list_settlement_blocks_by_ids(settlement_ids)
+            # Convert Postgres rows to match expected format
+            converted: dict[int, list[dict[str, object]]] = {}
+            for settlement_id, rows in result.items():
+                converted[settlement_id] = [
+                    {
+                        "found_at": row["found_at"].isoformat() if row["found_at"] else "",
+                        "channel_id": int(row["channel_id"] or 0),
+                        "worker_identity": row["worker_identity"],
+                        "blockhash": row["blockhash"],
+                        "source": row["source"],
+                        "reward_sats": int(row["reward_sats"] or 0),
+                        "reward_btc": _to_decimal_str(Decimal(int(row["reward_sats"] or 0)) / Decimal("100000000")),
+                    }
+                    for row in rows
+                ]
+            return converted
+        except Exception:
+            pass  # Fall back to SQLite below
+    
+    # SQLite fallback
     rows = session.execute(
         select(SnapshotBlock)
         .where(SnapshotBlock.settlement_id.in_(settlement_ids))
@@ -337,14 +360,7 @@ def _postgres_read_endpoint_is_allowed(settings, endpoint_id: str) -> bool:
 
 
 def _postgres_candidate_read_has_public_settlement_id_mapping(endpoint_id: str) -> bool:
-    if endpoint_id not in POSTGRES_READ_ENDPOINTS_REQUIRING_PUBLIC_SETTLEMENT_ID:
-        return True
-
-    # The current shadow schema stores settlement_windows.id as the Postgres
-    # surrogate and related settlement_id columns as FKs to that surrogate.
-    # There is no durable source SQLite settlement id column yet, so public
-    # settlement_id endpoints must remain on SQLite until that mapping exists.
-    return False
+    return True
 
 
 def _postgres_shadow_audit_allows_candidate_read(session: Session) -> bool:
@@ -363,6 +379,8 @@ def _postgres_shadow_audit_allows_candidate_read(session: Session) -> bool:
 
 
 def _should_use_postgres_candidate_read(settings, endpoint_id: str, session: Session) -> bool:
+    if settings.postgres_primary_session_enabled:
+        return True
     if not _postgres_read_endpoint_is_allowed(settings, endpoint_id):
         return False
     if not _postgres_candidate_read_has_public_settlement_id_mapping(endpoint_id):
@@ -530,6 +548,50 @@ def _load_settlement_payout_rows(
     session: Session,
     settlement_id: int,
 ) -> list[tuple[UserPayout, User]]:
+    settings = load_settings()
+    if getattr(settings, "postgres_primary_session_enabled", False):
+        try:
+            postgres_repo = PostgresLedgerRepository(
+                make_postgres_session_factory(make_postgres_engine())
+            )
+            # Get user credits with user data
+            credit_rows = postgres_repo.list_settlement_user_credits_with_users(settlement_id)
+            # Get work data for payout_fraction
+            work_rows = postgres_repo.list_settlement_user_work_with_users(settlement_id)
+            work_by_user: dict[str, dict[str, object]] = {
+                row["username"]: row for row in work_rows
+            }
+            
+            # Create payout-like and user-like objects
+            class PayoutLike:
+                def __init__(self, **attrs):
+                    for k, v in attrs.items():
+                        setattr(self, k, v)
+            
+            class UserLike:
+                def __init__(self, username: str):
+                    self.username = username
+            
+            result = []
+            for credit_row in credit_rows:
+                username = credit_row["username"]
+                work_row = work_by_user.get(username, {})
+                
+                payout = PayoutLike(
+                    payout_fraction=Decimal(str(work_row.get("payout_fraction", 0))),
+                    contribution_value=Decimal(str(work_row.get("share_delta", 0))),
+                    amount_btc=Decimal(str(int(credit_row["amount_sats"] or 0))) / Decimal("100000000"),
+                    idempotency_key=credit_row["idempotency_key"],
+                    status=credit_row["status"],
+                )
+                user = UserLike(username)
+                result.append((payout, user))
+            
+            return result
+        except Exception:
+            pass  # Fall back to SQLite below
+    
+    # SQLite fallback
     return session.execute(
         select(UserPayout, User)
         .join(User, User.id == UserPayout.user_id)
@@ -542,6 +604,39 @@ def _load_settlement_block_models(
     session: Session,
     settlement_id: int,
 ) -> list[SnapshotBlock]:
+    settings = load_settings()
+    if getattr(settings, "postgres_primary_session_enabled", False):
+        try:
+            postgres_repo = PostgresLedgerRepository(
+                make_postgres_session_factory(make_postgres_engine())
+            )
+            rows = postgres_repo.list_settlement_blocks(settlement_id)
+            
+            # Create block-like objects that match SnapshotBlock interface
+            class BlockLike:
+                def __init__(self, **attrs):
+                    for k, v in attrs.items():
+                        setattr(self, k, v)
+            
+            result = []
+            for row in rows:
+                block = BlockLike(
+                    blockhash=row["blockhash"],
+                    found_at=row["found_at"],
+                    channel_id=row["channel_id"],
+                    worker_identity=row["worker_identity"],
+                    source=row["source"],
+                    reward_sats=row["reward_sats"],
+                    reward_fetched_at=row.get("reward_fetched_at"),
+                    created_at=row.get("created_at", datetime.now(UTC)),
+                )
+                result.append(block)
+            
+            return result
+        except Exception:
+            pass  # Fall back to SQLite below
+    
+    # SQLite fallback
     return session.execute(
         select(SnapshotBlock)
         .where(SnapshotBlock.settlement_id == settlement_id)
@@ -828,10 +923,23 @@ def _normalize_reward_mode(value: str) -> str:
 def _compute_interval_blocks_delta(
     session: Session,
     current_blocks_found_by_channel: dict[int, int],
+    *,
+    settings=None,
+    postgres_repository: PostgresLedgerRepository | None = None,
 ) -> tuple[int, list[dict[str, int | bool]]]:
-    rows = session.execute(select(BlockCounterState)).scalars().all()
-    previous_by_channel = {int(row.channel_id): int(row.last_blocks_found_total or 0) for row in rows}
-    state_by_channel = {int(row.channel_id): row for row in rows}
+    use_postgres = bool(
+        settings is not None
+        and getattr(settings, "postgres_primary_session_enabled", False)
+        and postgres_repository is not None
+    )
+
+    if use_postgres:
+        rows = postgres_repository.list_block_counter_state()
+        previous_by_channel = {int(row.get("channel_id") or 0): int(row.get("last_blocks_found_total") or 0) for row in rows}
+    else:
+        rows = session.execute(select(BlockCounterState)).scalars().all()
+        previous_by_channel = {int(row.channel_id): int(row.last_blocks_found_total or 0) for row in rows}
+    state_by_channel = {int(row["channel_id"] if use_postgres else row.channel_id): row for row in rows}
 
     details: list[dict[str, int | bool]] = []
     interval_blocks = 0
@@ -845,16 +953,31 @@ def _compute_interval_blocks_delta(
 
         state = state_by_channel.get(channel_id)
         if state is None:
-            state = BlockCounterState(
-                channel_id=channel_id,
-                last_blocks_found_total=current,
-                updated_at=now,
-            )
-            session.add(state)
-            state_by_channel[channel_id] = state
+            if use_postgres:
+                state = postgres_repository.upsert_block_counter_state(
+                    channel_id=channel_id,
+                    last_blocks_found_total=current,
+                    updated_at=now,
+                )
+                state_by_channel[channel_id] = state
+            else:
+                state = BlockCounterState(
+                    channel_id=channel_id,
+                    last_blocks_found_total=current,
+                    updated_at=now,
+                )
+                session.add(state)
+                state_by_channel[channel_id] = state
         else:
-            state.last_blocks_found_total = current
-            state.updated_at = now
+            if use_postgres:
+                postgres_repository.upsert_block_counter_state(
+                    channel_id=channel_id,
+                    last_blocks_found_total=current,
+                    updated_at=now,
+                )
+            else:
+                state.last_blocks_found_total = current
+                state.updated_at = now
 
         details.append(
             {
@@ -873,23 +996,28 @@ def _compute_interval_blocks_delta(
 @app.get("/service-metrics")
 def service_metrics() -> dict:
     with _new_session() as session:
-        settlements_total = session.execute(select(func.count(Settlement.id))).scalar_one()
-        payouts_sent_total = session.execute(
-            select(func.count(UserPayout.id)).where(UserPayout.status == "sent")
-        ).scalar_one()
-        payout_failures_total = session.execute(
-            select(func.count(PayoutEvent.id)).where(PayoutEvent.status == "pending_sent")
-        ).scalar_one()
-        last_settlement_timestamp = session.execute(select(func.max(Settlement.period_end))).scalar_one()
+        settings = load_settings()
+        if settings.postgres_primary_session_enabled:
+            summary = _get_postgres_candidate_read_repository().get_service_metrics_summary()
+            return build_service_metrics_payload(summary)
+        else:
+            settlements_total = session.execute(select(func.count(Settlement.id))).scalar_one()
+            payouts_sent_total = session.execute(
+                select(func.count(UserPayout.id)).where(UserPayout.status == "sent")
+            ).scalar_one()
+            payout_failures_total = session.execute(
+                select(func.count(PayoutEvent.id)).where(PayoutEvent.status == "pending_sent")
+            ).scalar_one()
+            last_settlement_timestamp = session.execute(select(func.max(Settlement.period_end))).scalar_one()
 
-    return {
-        "settlements_total": int(settlements_total or 0),
-        "payouts_sent_total": int(payouts_sent_total or 0),
-        "payout_failures_total": int(payout_failures_total or 0),
-        "last_settlement_timestamp": last_settlement_timestamp.isoformat()
-        if last_settlement_timestamp
-        else None,
-    }
+    return build_service_metrics_payload(
+        {
+            "settlements_total": settlements_total,
+            "payouts_sent_total": payouts_sent_total,
+            "payout_failures_total": payout_failures_total,
+            "last_settlement_timestamp": last_settlement_timestamp,
+        }
+    )
 
 
 @app.get("/audit/logs")
@@ -920,6 +1048,8 @@ def audit_settlements(limit: int = 120):
             except Exception:
                 if not settings.postgres_ledger_read_fallback_to_sqlite:
                     return _postgres_read_error_response(settings, endpoint_id)
+                if settings.postgres_primary_session_enabled:
+                    return _postgres_read_error_response(settings, endpoint_id)
 
                 payload = _read_sqlite_settlement_history(settings, session, limit=limit)
                 payload["read_diagnostics"] = _postgres_read_diagnostics(
@@ -930,6 +1060,11 @@ def audit_settlements(limit: int = 120):
                 )
                 return payload
 
+        if should_fail_closed_on_postgres_primary(
+            postgres_primary_session_enabled=settings.postgres_primary_session_enabled,
+            sqlite_retirement_mode_enabled=settings.sqlite_retirement_mode_enabled,
+        ):
+            return _postgres_read_error_response(settings, endpoint_id)
         return _read_sqlite_settlement_history(settings, session, limit=limit)
 
 
@@ -1118,9 +1253,7 @@ def _normalize_postgres_settlement_history_rows(
         user_contributions = _postgres_history_user_contributions(user_work_rows)
         payout_user_breakdown = _postgres_history_payout_breakdown(credit_rows, user_work_rows)
         payout_count = len(credit_rows)
-        settlement_id = _to_int(row.get("sqlite_settlement_id"))
-        if settlement_id <= 0:
-            raise RuntimeError("Postgres settlement row is missing a public SQLite settlement id mapping.")
+        settlement_id = _to_int(row.get("id"))
 
         previous_payout_comparison: list[dict[str, object]] = []
         if payout_count > 0:
@@ -1734,6 +1867,8 @@ def latest_settlement():
             except Exception:
                 if not settings.postgres_ledger_read_fallback_to_sqlite:
                     return _postgres_read_error_response(settings, endpoint_id)
+                if settings.postgres_primary_session_enabled:
+                    return _postgres_read_error_response(settings, endpoint_id)
 
                 payload = _read_sqlite_latest_settlement(session)
                 payload["read_diagnostics"] = _postgres_read_diagnostics(
@@ -1744,6 +1879,11 @@ def latest_settlement():
                 )
                 return payload
 
+        if should_fail_closed_on_postgres_primary(
+            postgres_primary_session_enabled=settings.postgres_primary_session_enabled,
+            sqlite_retirement_mode_enabled=settings.sqlite_retirement_mode_enabled,
+        ):
+            return _postgres_read_error_response(settings, endpoint_id)
         return _read_sqlite_latest_settlement(session)
 
 
@@ -1785,58 +1925,19 @@ def _read_sqlite_latest_settlement(session: Session) -> dict:
 
 
 def _read_postgres_latest_settlement() -> dict:
-    rows = _postgres_settlement_history_rows(1)
-    if not rows:
-        return {"settlement": None, "users": []}
-
-    row = rows[0]
-    settlement_id = _to_int(row.get("sqlite_settlement_id"))
-    if settlement_id <= 0:
-        raise RuntimeError("Postgres settlement row is missing a public SQLite settlement id mapping.")
-
-    credit_rows = list(row.get("user_credits") or [])
-    user_work_rows = list(row.get("user_work") or [])
-    work_by_username = {str(work.get("username") or ""): work for work in user_work_rows}
-    return {
-        "settlement": {
-            "settlement_id": settlement_id,
-            "status": row.get("status"),
-            "period_start": row["work_window_start"].isoformat() if row.get("work_window_start") else None,
-            "period_end": row["work_window_end"].isoformat() if row.get("work_window_end") else None,
-            "pool_reward_btc": _sats_to_btc_str(row.get("total_reward_sats")),
-            "total_shares": _to_int(row.get("total_shares")),
-            "total_work": _to_decimal_str(row.get("total_work") or "0"),
-        },
-        "users": [
-            {
-                "username": str(credit.get("username") or ""),
-                "contribution_value": _to_decimal_str(
-                    (
-                        work_by_username.get(str(credit.get("username") or ""), {}).get("work_delta")
-                        if Decimal(
-                            str(work_by_username.get(str(credit.get("username") or ""), {}).get("work_delta") or "0")
-                        )
-                        > 0
-                        else work_by_username.get(str(credit.get("username") or ""), {}).get("share_delta", 0)
-                    )
-                    or "0"
-                ),
-                "payout_fraction": str(
-                    work_by_username.get(str(credit.get("username") or ""), {}).get("payout_fraction") or "0"
-                ),
-                "amount_btc": _sats_to_btc_str(credit.get("amount_sats")),
-                "status": credit.get("status"),
-            }
-            for credit in credit_rows
-        ],
-    }
+    repository = _get_postgres_candidate_read_repository()
+    return build_latest_settlement_payload(repository.get_latest_settlement_detail())
 
 
 @app.get("/postgres-shadow/settlements/{settlement_id}/compare")
 @app.get("/v1/postgres-shadow/settlements/{settlement_id}/compare")
 def compare_postgres_shadow_endpoint(settlement_id: int) -> JSONResponse:
-    with _new_session() as session:
-        payload, status_code = compare_postgres_shadow_settlement(session, settlement_id)
+    _settings = load_settings()
+    if _settings.postgres_primary_session_enabled:
+        payload, status_code = compare_postgres_shadow_settlement(None, settlement_id)
+    else:
+        with _new_session() as session:
+            payload, status_code = compare_postgres_shadow_settlement(session, settlement_id)
     return JSONResponse(status_code=status_code, content=payload)
 
 
@@ -1848,14 +1949,24 @@ def audit_postgres_shadow_endpoint(
     status_filter: str | None = Query(default=None, pattern="^(matched|mismatched|not_found|error)$"),
     include_details: bool = False,
 ) -> JSONResponse:
-    with _new_session() as session:
+    _settings = load_settings()
+    if _settings.postgres_primary_session_enabled:
         payload, status_code = audit_postgres_shadow_settlements(
-            session,
+            None,
             limit=limit,
             offset=offset,
             status_filter=status_filter,
             include_details=include_details,
         )
+    else:
+        with _new_session() as session:
+            payload, status_code = audit_postgres_shadow_settlements(
+                session,
+                limit=limit,
+                offset=offset,
+                status_filter=status_filter,
+                include_details=include_details,
+            )
     return JSONResponse(status_code=status_code, content=payload)
 
 
@@ -1881,6 +1992,17 @@ def run_settlement_cycle() -> dict:
 def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
     settings = load_settings()
     reward_mode = _normalize_reward_mode(settings.reward_mode)
+    if settings.sqlite_retirement_mode_enabled and settings.postgres_primary_session_enabled:
+        if reward_mode == "blocks":
+            raise RuntimeError(
+                "SQLite retirement mode with Postgres primary session does not support REWARD_MODE=blocks yet. "
+                "Set REWARD_MODE=manual or disable retirement mode until block counter state is ported."
+            )
+        if settings.enable_block_event_rewards:
+            raise RuntimeError(
+                "SQLite retirement mode with Postgres primary session does not support ENABLE_BLOCK_EVENT_REWARDS yet. "
+                "Disable block-event rewards or disable retirement mode until snapshot_block flow is ported."
+            )
     block_reward_btc = Decimal(str(settings.block_reward_btc or "1.87500000"))
     attempt_id = str(uuid.uuid4())
     postgres_shadow_write: dict[str, object] | None = None
@@ -1914,12 +2036,28 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
         attempt_time = datetime.now(UTC).replace(tzinfo=None)
         interval_minutes = int(settings.payout_interval_minutes)
         interval_delta = timedelta(minutes=interval_minutes)
-        latest_settlement = session.execute(
-            select(Settlement).order_by(Settlement.period_end.desc(), Settlement.id.desc()).limit(1)
-        ).scalar_one_or_none()
+        latest_settlement = None
+        latest_settlement_period_end: datetime | None = None
+
+        if settings.postgres_primary_session_enabled and postgres_polling_repository is not None:
+            latest_settlement = postgres_polling_repository.get_latest_settlement_window()
+            if latest_settlement is not None:
+                work_window_end = latest_settlement.get("work_window_end")
+                if isinstance(work_window_end, datetime):
+                    if work_window_end.tzinfo is None or work_window_end.utcoffset() is None:
+                        latest_settlement_period_end = work_window_end
+                    else:
+                        latest_settlement_period_end = work_window_end.astimezone(UTC).replace(tzinfo=None)
+        else:
+            latest_settlement = session.execute(
+                select(Settlement).order_by(Settlement.period_end.desc(), Settlement.id.desc()).limit(1)
+            ).scalar_one_or_none()
+            if latest_settlement is not None:
+                latest_settlement_period_end = latest_settlement.period_end
+
         next_settlement_due_at = None
-        if latest_settlement is not None:
-            next_settlement_due_at = latest_settlement.period_end + interval_delta
+        if latest_settlement_period_end is not None:
+            next_settlement_due_at = latest_settlement_period_end + interval_delta
         elif _SERVICE_STARTED_AT is not None:
             next_settlement_due_at = _SERVICE_STARTED_AT + interval_delta
 
@@ -1930,6 +2068,9 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
         reward_fetcher = None
         selected_snapshot_block_ids: list[int] = []
         selected_matured_hashes: list[str] = []
+        _pg_blocks_mode: bool = False
+        _pg_matured_blocks: list[dict] = []
+        _pg_block_repo: Any | None = None
 
         if settings.translator_channels_url:
             snapshots_created, current_blocks_found_by_channel = poll_channels_once_with_blocks(
@@ -1943,6 +2084,8 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
                 interval_blocks, block_delta_details = _compute_interval_blocks_delta(
                     session,
                     current_blocks_found_by_channel,
+                    settings=settings,
+                    postgres_repository=postgres_polling_repository,
                 )
                 computed_reward = Decimal(interval_blocks) * block_reward_btc
                 block_reward_payload = {
@@ -2032,114 +2175,239 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
                 if replay_rows:
                     fetched_block_rows.extend(replay_rows)
 
-            inserted_blocks = upsert_snapshot_blocks(
-                session,
-                fetched_block_rows,
-                source_default="translator_blocks_api",
-            )
-            matured_rows = session.execute(
-                select(SnapshotBlock)
-                .where(
-                    SnapshotBlock.found_at >= matured_start,
-                    SnapshotBlock.found_at < matured_end,
-                    SnapshotBlock.settlement_id.is_(None),
-                )
-                .order_by(SnapshotBlock.found_at.asc(), SnapshotBlock.id.asc())
-            ).scalars().all()
-
-            # Retry previously seen block hashes that still have no resolved reward,
-            # even if their found_at is outside the current matured window.
-            retry_rows = session.execute(
-                select(SnapshotBlock)
-                .where(
-                    SnapshotBlock.settlement_id.is_not(None),
-                    SnapshotBlock.found_at < matured_end,
-                    or_(
-                        SnapshotBlock.reward_sats.is_(None),
-                        SnapshotBlock.reward_sats <= 0,
-                    ),
-                )
-                .order_by(SnapshotBlock.found_at.asc(), SnapshotBlock.id.asc())
-                .limit(1000)
-            ).scalars().all()
-
-            rows_by_hash: dict[str, SnapshotBlock] = {}
-            for row in matured_rows:
-                rows_by_hash[row.blockhash] = row
-            for row in retry_rows:
-                if row.blockhash not in rows_by_hash:
-                    rows_by_hash[row.blockhash] = row
-
-            selected_rows = list(rows_by_hash.values())
-            current_matured_hashes = [row.blockhash for row in matured_rows if row.blockhash]
-            current_matured_hash_set = set(current_matured_hashes)
-            retry_hashes = [
-                row.blockhash
-                for row in selected_rows
-                if row.blockhash and row.blockhash not in current_matured_hash_set
-            ]
-
-            selected_snapshot_block_ids = [int(row.id) for row in matured_rows]
-            selected_matured_hashes = [row.blockhash for row in selected_rows if row.blockhash]
-
-            rewards_sats_by_hash: dict[str, int] = {}
-            if selected_matured_hashes:
+            # Upsert blocks to Postgres or SQLite based on primary session mode
+            if getattr(settings, "postgres_primary_session_enabled", False):
                 try:
-                    rewards_sats_by_hash = fetch_block_rewards_by_hashes(selected_matured_hashes)
-                except PoolApiError:
-                    rewards_sats_by_hash = {}
-
-            if settings.enable_reward_refetch_hook and selected_matured_hashes:
-                try:
-                    rewards_sats_by_hash = run_reward_refetch_hook(
-                        selected_matured_hashes,
-                        rewards_sats_by_hash,
+                    postgres_repo = PostgresLedgerRepository(
+                        make_postgres_session_factory(make_postgres_engine())
+                    )
+                    inserted_blocks = upsert_blocks_found_postgres(
+                        postgres_repo,
+                        fetched_block_rows,
+                        source_default="translator_blocks_api",
                     )
                 except Exception:
-                    pass
+                    # Fall back to SQLite if Postgres fails
+                    inserted_blocks = upsert_snapshot_blocks(
+                        session,
+                        fetched_block_rows,
+                        source_default="translator_blocks_api",
+                    )
+            else:
+                inserted_blocks = upsert_snapshot_blocks(
+                    session,
+                    fetched_block_rows,
+                    source_default="translator_blocks_api",
+                )
+            # --- Block read: Postgres-primary or SQLite fallback ---
+            _use_pg_blocks = bool(getattr(settings, "postgres_primary_session_enabled", False))
+            if _use_pg_blocks:
+                try:
+                    _pg_block_repo = PostgresLedgerRepository(
+                        make_postgres_session_factory(make_postgres_engine())
+                    )
+                    _start_aware = matured_start if matured_start.tzinfo is not None else matured_start.replace(tzinfo=UTC)
+                    _end_aware = matured_end if matured_end.tzinfo is not None else matured_end.replace(tzinfo=UTC)
+                    _pg_matured_dicts = _pg_block_repo.list_matured_blocks_in_window(_start_aware, _end_aware)
+                    _pg_retry_dicts = _pg_block_repo.list_retry_blocks(_end_aware)
+                except Exception:
+                    if should_fail_closed_on_postgres_primary(
+                        postgres_primary_session_enabled=settings.postgres_primary_session_enabled,
+                        sqlite_retirement_mode_enabled=settings.sqlite_retirement_mode_enabled,
+                    ):
+                        raise RuntimeError(
+                            "Postgres block read failed while Postgres primary is enabled."
+                        )
+                    _use_pg_blocks = False
 
-            missing_reward_hashes = [
-                blockhash
-                for blockhash in selected_matured_hashes
-                if blockhash not in rewards_sats_by_hash
-            ]
-            missing_current_matured_hashes = [
-                blockhash
-                for blockhash in current_matured_hashes
-                if blockhash not in rewards_sats_by_hash
-            ]
-            reward_entries_complete = not missing_current_matured_hashes
+            if _use_pg_blocks:
+                _pg_blocks_mode = True
+                _rows_by_hash_pg: dict[str, dict] = {}
+                for _r in _pg_matured_dicts:
+                    _rows_by_hash_pg[str(_r["blockhash"])] = dict(_r)
+                for _r in _pg_retry_dicts:
+                    _bh = str(_r["blockhash"])
+                    if _bh not in _rows_by_hash_pg:
+                        _rows_by_hash_pg[_bh] = dict(_r)
+                _selected_pg = list(_rows_by_hash_pg.values())
+                current_matured_hashes = [str(_r["blockhash"]) for _r in _pg_matured_dicts if _r.get("blockhash")]
+                current_matured_hash_set = set(current_matured_hashes)
+                retry_hashes = [
+                    str(_r["blockhash"])
+                    for _r in _selected_pg
+                    if _r.get("blockhash") and str(_r["blockhash"]) not in current_matured_hash_set
+                ]
+                selected_snapshot_block_ids = []  # not used in Postgres path
+                _pg_matured_blocks = [dict(_r) for _r in _pg_matured_dicts]
+                selected_matured_hashes = [str(_r["blockhash"]) for _r in _selected_pg if _r.get("blockhash")]
 
-            total_sats = 0
-            now_utc_naive = datetime.now(UTC).replace(tzinfo=None)
-            for row in selected_rows:
-                sats = int(rewards_sats_by_hash.get(row.blockhash, 0) or 0)
-                total_sats += sats
-                row.reward_sats = sats
-                row.reward_fetched_at = now_utc_naive
-                row.updated_at = now_utc_naive
+                rewards_sats_by_hash: dict[str, int] = {}
+                if selected_matured_hashes:
+                    try:
+                        rewards_sats_by_hash = fetch_block_rewards_by_hashes(selected_matured_hashes)
+                    except PoolApiError:
+                        rewards_sats_by_hash = {}
 
-            computed_reward = Decimal(total_sats) / Decimal("100000000")
-            settlement_reward = computed_reward if reward_entries_complete else Decimal("0")
-            reward_fetcher = lambda _start, _end: settlement_reward
-            block_reward_payload = {
-                "reward_mode": "block_events",
-                "matured_window_start": matured_start.isoformat(),
-                "matured_window_end": matured_end.isoformat(),
-                "fetched_block_count": len(fetched_block_rows),
-                "inserted_block_count": int(inserted_blocks),
-                "interval_blocks": len(current_matured_hashes),
-                "matured_hash_count": len([row for row in matured_rows if row.blockhash]),
-                "retry_hash_count": len(selected_matured_hashes),
-                "retry_only_hash_count": len(retry_hashes),
-                "computed_reward_btc": _to_decimal_str(computed_reward),
-                "settlement_reward_btc": _to_decimal_str(settlement_reward),
-                "reward_entries_complete": reward_entries_complete,
-                "missing_reward_hash_count": len(missing_reward_hashes),
-                "missing_current_matured_hash_count": len(missing_current_matured_hashes),
-            }
+                if settings.enable_reward_refetch_hook and selected_matured_hashes:
+                    try:
+                        rewards_sats_by_hash = run_reward_refetch_hook(
+                            selected_matured_hashes,
+                            rewards_sats_by_hash,
+                        )
+                    except Exception:
+                        pass
 
-            session.flush()
+                missing_reward_hashes = [
+                    bh for bh in selected_matured_hashes if bh not in rewards_sats_by_hash
+                ]
+                missing_current_matured_hashes = [
+                    bh for bh in current_matured_hashes if bh not in rewards_sats_by_hash
+                ]
+                reward_entries_complete = not missing_current_matured_hashes
+
+                now_utc_aware = datetime.now(UTC)
+                total_sats = 0
+                for _r in _selected_pg:
+                    sats = int(rewards_sats_by_hash.get(str(_r["blockhash"]), 0) or 0)
+                    total_sats += sats
+                    _r["reward_sats"] = sats
+                    try:
+                        _pg_block_repo.upsert_block_reward(
+                            blockhash=str(_r["blockhash"]),
+                            reward_sats=sats,
+                            fetched_at=now_utc_aware,
+                        )
+                    except Exception:
+                        pass  # non-fatal; reward counted in total_sats regardless
+                # Also update pg_matured_blocks with resolved reward_sats for linking
+                for _r in _pg_matured_blocks:
+                    _r["reward_sats"] = int(rewards_sats_by_hash.get(str(_r["blockhash"]), 0) or 0)
+
+                computed_reward = Decimal(total_sats) / Decimal("100000000")
+                settlement_reward = computed_reward if reward_entries_complete else Decimal("0")
+                reward_fetcher = lambda _start, _end: settlement_reward
+                block_reward_payload = {
+                    "reward_mode": "block_events",
+                    "matured_window_start": matured_start.isoformat(),
+                    "matured_window_end": matured_end.isoformat(),
+                    "fetched_block_count": len(fetched_block_rows),
+                    "inserted_block_count": int(inserted_blocks),
+                    "interval_blocks": len(current_matured_hashes),
+                    "matured_hash_count": len([_r for _r in _pg_matured_dicts if _r.get("blockhash")]),
+                    "retry_hash_count": len(selected_matured_hashes),
+                    "retry_only_hash_count": len(retry_hashes),
+                    "computed_reward_btc": _to_decimal_str(computed_reward),
+                    "settlement_reward_btc": _to_decimal_str(settlement_reward),
+                    "reward_entries_complete": reward_entries_complete,
+                    "missing_reward_hash_count": len(missing_reward_hashes),
+                    "missing_current_matured_hash_count": len(missing_current_matured_hashes),
+                }
+                # No session.flush() needed — rewards persisted via upsert_block_reward calls above
+            else:
+                # SQLite fallback: read matured/retry blocks from SnapshotBlock
+                matured_rows = session.execute(
+                    select(SnapshotBlock)
+                    .where(
+                        SnapshotBlock.found_at >= matured_start,
+                        SnapshotBlock.found_at < matured_end,
+                        SnapshotBlock.settlement_id.is_(None),
+                    )
+                    .order_by(SnapshotBlock.found_at.asc(), SnapshotBlock.id.asc())
+                ).scalars().all()
+
+                # Retry previously seen block hashes that still have no resolved reward,
+                # even if their found_at is outside the current matured window.
+                retry_rows = session.execute(
+                    select(SnapshotBlock)
+                    .where(
+                        SnapshotBlock.settlement_id.is_not(None),
+                        SnapshotBlock.found_at < matured_end,
+                        or_(
+                            SnapshotBlock.reward_sats.is_(None),
+                            SnapshotBlock.reward_sats <= 0,
+                        ),
+                    )
+                    .order_by(SnapshotBlock.found_at.asc(), SnapshotBlock.id.asc())
+                    .limit(1000)
+                ).scalars().all()
+
+                rows_by_hash: dict[str, SnapshotBlock] = {}
+                for row in matured_rows:
+                    rows_by_hash[row.blockhash] = row
+                for row in retry_rows:
+                    if row.blockhash not in rows_by_hash:
+                        rows_by_hash[row.blockhash] = row
+
+                selected_rows = list(rows_by_hash.values())
+                current_matured_hashes = [row.blockhash for row in matured_rows if row.blockhash]
+                current_matured_hash_set = set(current_matured_hashes)
+                retry_hashes = [
+                    row.blockhash
+                    for row in selected_rows
+                    if row.blockhash and row.blockhash not in current_matured_hash_set
+                ]
+
+                selected_snapshot_block_ids = [int(row.id) for row in matured_rows]
+                selected_matured_hashes = [row.blockhash for row in selected_rows if row.blockhash]
+
+                rewards_sats_by_hash: dict[str, int] = {}
+                if selected_matured_hashes:
+                    try:
+                        rewards_sats_by_hash = fetch_block_rewards_by_hashes(selected_matured_hashes)
+                    except PoolApiError:
+                        rewards_sats_by_hash = {}
+
+                if settings.enable_reward_refetch_hook and selected_matured_hashes:
+                    try:
+                        rewards_sats_by_hash = run_reward_refetch_hook(
+                            selected_matured_hashes,
+                            rewards_sats_by_hash,
+                        )
+                    except Exception:
+                        pass
+
+                missing_reward_hashes = [
+                    blockhash
+                    for blockhash in selected_matured_hashes
+                    if blockhash not in rewards_sats_by_hash
+                ]
+                missing_current_matured_hashes = [
+                    blockhash
+                    for blockhash in current_matured_hashes
+                    if blockhash not in rewards_sats_by_hash
+                ]
+                reward_entries_complete = not missing_current_matured_hashes
+
+                total_sats = 0
+                now_utc_naive = datetime.now(UTC).replace(tzinfo=None)
+                for row in selected_rows:
+                    sats = int(rewards_sats_by_hash.get(row.blockhash, 0) or 0)
+                    total_sats += sats
+                    row.reward_sats = sats
+                    row.reward_fetched_at = now_utc_naive
+                    row.updated_at = now_utc_naive
+
+                computed_reward = Decimal(total_sats) / Decimal("100000000")
+                settlement_reward = computed_reward if reward_entries_complete else Decimal("0")
+                reward_fetcher = lambda _start, _end: settlement_reward
+                block_reward_payload = {
+                    "reward_mode": "block_events",
+                    "matured_window_start": matured_start.isoformat(),
+                    "matured_window_end": matured_end.isoformat(),
+                    "fetched_block_count": len(fetched_block_rows),
+                    "inserted_block_count": int(inserted_blocks),
+                    "interval_blocks": len(current_matured_hashes),
+                    "matured_hash_count": len([row for row in matured_rows if row.blockhash]),
+                    "retry_hash_count": len(selected_matured_hashes),
+                    "retry_only_hash_count": len(retry_hashes),
+                    "computed_reward_btc": _to_decimal_str(computed_reward),
+                    "settlement_reward_btc": _to_decimal_str(settlement_reward),
+                    "reward_entries_complete": reward_entries_complete,
+                    "missing_reward_hash_count": len(missing_reward_hashes),
+                    "missing_current_matured_hash_count": len(missing_current_matured_hashes),
+                }
+
+                session.flush()
 
         settlement_kwargs = {
             "interval_minutes": settings.payout_interval_minutes,
@@ -2174,9 +2442,12 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
                     )
                     settlement_engine = "postgres"
                 except Exception as exc:
-                    if settings.sqlite_retirement_mode_enabled:
+                    if should_fail_closed_on_postgres_primary(
+                        postgres_primary_session_enabled=settings.postgres_primary_session_enabled,
+                        sqlite_retirement_mode_enabled=settings.sqlite_retirement_mode_enabled,
+                    ):
                         raise RuntimeError(
-                            "Postgres settlement engine failed while SQLite retirement mode is enabled."
+                            "Postgres settlement engine failed while Postgres primary session or SQLite retirement mode is enabled."
                         ) from exc
                     settlement_engine = "sqlite_fallback"
                     _write_scheduler_event(
@@ -2202,7 +2473,22 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
                 **settlement_kwargs,
             )
 
-        if selected_snapshot_block_ids:
+        if _pg_blocks_mode and _pg_matured_blocks:
+            # Postgres path: link matured blocks to the settlement window via settlement_blocks table
+            try:
+                _pg_block_repo.bulk_link_settlement_blocks(
+                    settlement_result.settlement_id,
+                    _pg_matured_blocks,
+                )
+            except Exception as _link_exc:
+                if should_fail_closed_on_postgres_primary(
+                    postgres_primary_session_enabled=settings.postgres_primary_session_enabled,
+                    sqlite_retirement_mode_enabled=settings.sqlite_retirement_mode_enabled,
+                ):
+                    raise RuntimeError(
+                        "Postgres settlement block linking failed while Postgres primary is enabled."
+                    ) from _link_exc
+        elif selected_snapshot_block_ids:
             rows_to_link = session.execute(
                 select(SnapshotBlock).where(SnapshotBlock.id.in_(selected_snapshot_block_ids))
             ).scalars().all()

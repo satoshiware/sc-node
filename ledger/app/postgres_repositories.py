@@ -31,6 +31,7 @@ from app.postgres_schema import (
     audit_events,
     block_rewards,
     blocks_found,
+    block_counter_state,
     carry_state,
     metadata,
     miner_identities,
@@ -566,6 +567,66 @@ class PostgresLedgerRepository:
             .limit(1)
         )
 
+    def list_block_counter_state(self) -> list[dict[str, Any]]:
+        return self._select_all(select(block_counter_state).order_by(block_counter_state.c.channel_id.asc()))
+
+    def upsert_block_counter_state(
+        self,
+        *,
+        channel_id: int,
+        last_blocks_found_total: int,
+        updated_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        _require_tzaware("updated_at", updated_at)
+        effective_updated_at = updated_at or utcnow()
+        statement = (
+            pg_insert(block_counter_state)
+            .values(
+                channel_id=channel_id,
+                last_blocks_found_total=last_blocks_found_total,
+                updated_at=effective_updated_at,
+            )
+            .on_conflict_do_update(
+                index_elements=[block_counter_state.c.channel_id],
+                set_={
+                    "last_blocks_found_total": last_blocks_found_total,
+                    "updated_at": effective_updated_at,
+                },
+            )
+            .returning(*block_counter_state.c)
+        )
+        return self._execute_returning_one(statement)
+
+    def get_latest_settlement_detail(self) -> dict[str, Any] | None:
+        settlement = self.get_latest_settlement_window()
+        if settlement is None:
+            return None
+
+        settlement_id = int(settlement.get("id") or 0)
+        return {
+            "settlement": settlement,
+            "user_credits": self.list_settlement_user_credits_with_users(settlement_id),
+            "user_work": self.list_settlement_user_work_with_users(settlement_id),
+            "settlement_blocks": self.list_settlement_blocks(settlement_id),
+        }
+
+    def get_service_metrics_summary(self) -> dict[str, Any]:
+        settlements_total = self._select_one_or_none(select(func.count(settlement_windows.c.id)))
+        payouts_sent_total = self._select_one_or_none(
+            select(func.count(settlement_user_credits.c.id)).where(settlement_user_credits.c.status == "sent")
+        )
+        payout_failures_total = self._select_one_or_none(
+            select(func.count(payout_events.c.id)).where(payout_events.c.status == "pending_sent")
+        )
+        last_settlement_timestamp = self._select_one_or_none(select(func.max(settlement_windows.c.work_window_end)))
+
+        return {
+            "settlements_total": int(settlements_total or 0),
+            "payouts_sent_total": int(payouts_sent_total or 0),
+            "payout_failures_total": int(payout_failures_total or 0),
+            "last_settlement_timestamp": last_settlement_timestamp,
+        }
+
     def get_settlement_window_by_range(
         self,
         *,
@@ -1010,6 +1071,146 @@ class PostgresLedgerRepository:
             )
             .where(settlement_blocks.c.settlement_id == settlement_id)
             .order_by(blocks_found.c.found_at.asc(), settlement_blocks.c.id.asc())
+        )
+
+    def list_settlement_blocks_by_ids(self, settlement_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+        """Get settlement blocks grouped by settlement_id."""
+        if not settlement_ids:
+            return {}
+        
+        rows = self._select_all(
+            select(
+                settlement_blocks.c.id,
+                settlement_blocks.c.settlement_id,
+                settlement_blocks.c.blockhash,
+                settlement_blocks.c.reward_sats,
+                blocks_found.c.found_at,
+                blocks_found.c.channel_id,
+                blocks_found.c.worker_identity,
+                blocks_found.c.source,
+            )
+            .select_from(
+                settlement_blocks.join(
+                    blocks_found,
+                    blocks_found.c.blockhash == settlement_blocks.c.blockhash,
+                )
+            )
+            .where(settlement_blocks.c.settlement_id.in_(settlement_ids))
+            .order_by(
+                settlement_blocks.c.settlement_id.asc(),
+                blocks_found.c.found_at.asc(),
+                settlement_blocks.c.id.asc()
+            )
+        )
+        
+        result: dict[int, list[dict[str, Any]]] = {}
+        for row in rows:
+            settlement_id = int(row["settlement_id"])
+            result.setdefault(settlement_id, []).append(row)
+        
+        return result
+
+    def list_matured_blocks_in_window(
+        self,
+        matured_start: datetime,
+        matured_end: datetime,
+    ) -> list[dict[str, Any]]:
+        """Return blocks_found rows in [matured_start, matured_end) not yet linked to a settlement."""
+        _require_tzaware("matured_start", matured_start)
+        _require_tzaware("matured_end", matured_end)
+        from sqlalchemy import not_, exists
+        stmt = (
+            select(
+                blocks_found.c.id,
+                blocks_found.c.blockhash,
+                blocks_found.c.found_at,
+                blocks_found.c.channel_id,
+                blocks_found.c.worker_identity,
+                blocks_found.c.source,
+            )
+            .where(
+                blocks_found.c.found_at >= matured_start,
+                blocks_found.c.found_at < matured_end,
+                not_(
+                    exists(
+                        select(settlement_blocks.c.blockhash).where(
+                            settlement_blocks.c.blockhash == blocks_found.c.blockhash
+                        )
+                    )
+                ),
+            )
+            .order_by(blocks_found.c.found_at.asc(), blocks_found.c.id.asc())
+        )
+        return self._select_all(stmt)
+
+    def list_retry_blocks(
+        self,
+        matured_end: datetime,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """Return blocks already linked to a settlement but with no resolved reward (for retry)."""
+        _require_tzaware("matured_end", matured_end)
+        from sqlalchemy import or_
+        stmt = (
+            select(
+                blocks_found.c.id,
+                blocks_found.c.blockhash,
+                blocks_found.c.found_at,
+                blocks_found.c.channel_id,
+                blocks_found.c.worker_identity,
+                blocks_found.c.source,
+                settlement_blocks.c.settlement_id,
+            )
+            .select_from(
+                blocks_found.join(
+                    settlement_blocks,
+                    settlement_blocks.c.blockhash == blocks_found.c.blockhash,
+                )
+            )
+            .where(
+                blocks_found.c.found_at < matured_end,
+                or_(
+                    settlement_blocks.c.reward_sats.is_(None),
+                    settlement_blocks.c.reward_sats <= 0,
+                ),
+            )
+            .order_by(blocks_found.c.found_at.asc(), blocks_found.c.id.asc())
+            .limit(limit)
+        )
+        return self._select_all(stmt)
+
+    def bulk_link_settlement_blocks(
+        self,
+        settlement_id: int,
+        blocks: list[dict[str, Any]],
+    ) -> int:
+        """Link a list of block dicts (each with 'blockhash' and 'reward_sats') to a settlement.
+
+        Ignores conflicts (a block already linked to another settlement is silently skipped).
+        Returns the number of rows successfully inserted.
+        """
+        inserted = 0
+        for block in blocks:
+            blockhash = str(block["blockhash"])
+            reward_sats = int(block.get("reward_sats") or 0)
+            try:
+                self.link_settlement_block(
+                    settlement_id=settlement_id,
+                    blockhash=blockhash,
+                    reward_sats=reward_sats,
+                )
+                inserted += 1
+            except (ValueError, RuntimeError):
+                # Already linked to same or different settlement — skip silently
+                pass
+        return inserted
+
+    def list_settlement_windows_paginated(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        return self._select_all(
+            select(settlement_windows)
+            .order_by(settlement_windows.c.work_window_end.desc(), settlement_windows.c.id.desc())
+            .limit(limit)
+            .offset(offset)
         )
 
     def list_settlement_history(self, limit: int = 100) -> list[dict[str, Any]]:

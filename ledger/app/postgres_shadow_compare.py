@@ -234,14 +234,99 @@ def _mismatch(field: str, sqlite_value: object, postgres_value: object, message:
     }
 
 
+def _postgres_primary_compare(
+    repository: PostgresLedgerRepository,
+    settlement_id: int,
+    *,
+    checked_at: str,
+) -> tuple[dict[str, object], int]:
+    """Postgres-only comparison used when SQLite is retired (session=None)."""
+    try:
+        row = repository.get_settlement_window_by_id(settlement_id)
+    except Exception as exc:
+        return (
+            {
+                "status": "error",
+                "settlement_id": settlement_id,
+                "comparison_status": "error",
+                "sqlite_summary": None,
+                "postgres_summary": None,
+                "mismatches": [],
+                "error": f"Postgres query failed: {exc}",
+                "checked_at": checked_at,
+            },
+            503,
+        )
+    if row is None:
+        return (
+            {
+                "status": "ok",
+                "settlement_id": settlement_id,
+                "comparison_status": "not_found",
+                "sqlite_summary": None,
+                "postgres_summary": None,
+                "mismatches": [],
+                "checked_at": checked_at,
+            },
+            404,
+        )
+
+    credits = repository.list_settlement_user_credits_with_users(int(row["id"]))
+    blocks = repository.list_settlement_blocks(int(row["id"]))
+    postgres_summary = {
+        "settlement_window_id": int(row["id"]),
+        "status": row["status"],
+        "settlement_run_at": row["settlement_run_at"].isoformat() if row.get("settlement_run_at") else None,
+        "work_window_start": row["work_window_start"].isoformat(),
+        "work_window_end": row["work_window_end"].isoformat(),
+        "total_reward_sats": int(row["total_reward_sats"] or 0),
+        "total_work": _to_decimal_str(_normalize_work(row["total_work"] or 0)),
+        "total_shares": int(row["total_shares"] or 0),
+        "user_payout_count": len(credits),
+        "user_payouts": [
+            {
+                "username": str(c["username"]),
+                "amount_sats": int(c["amount_sats"] or 0),
+                "status": c["status"],
+                "idempotency_key": c["idempotency_key"],
+            }
+            for c in credits
+        ],
+        "rewarded_block_count": len(blocks),
+        "rewarded_block_total_sats": sum(int(b["reward_sats"] or 0) for b in blocks),
+    }
+    return (
+        {
+            "status": "ok",
+            "settlement_id": settlement_id,
+            "comparison_status": "postgres_primary",
+            "sqlite_summary": None,
+            "postgres_summary": postgres_summary,
+            "mismatches": [],
+            "checked_at": checked_at,
+        },
+        200,
+    )
+
+
 def compare_postgres_shadow_settlement(
-    session: Session,
+    session: Session | None,
     settlement_id: int,
     *,
     repository: PostgresLedgerRepository | None = None,
     checked_at: str | None = None,
 ) -> tuple[dict[str, object], int]:
     effective_checked_at = checked_at or datetime.now(UTC).isoformat()
+
+    # Postgres-primary mode: no SQLite session available
+    if session is None:
+        effective_repository = repository or get_postgres_shadow_compare_repository()
+        return _postgres_primary_compare(
+            effective_repository,
+            settlement_id,
+            checked_at=effective_checked_at,
+        )
+
     context = _load_sqlite_settlement_context(session, settlement_id)
     if context is None:
         return (
@@ -440,8 +525,79 @@ def _audit_summary_status(
     return "mismatched"
 
 
+def _postgres_primary_audit(
+    repository: PostgresLedgerRepository,
+    *,
+    limit: int = 100,
+    offset: int = 0,
+    status_filter: str | None = None,
+    include_details: bool = False,
+    checked_at: str,
+) -> tuple[dict[str, object], int]:
+    """Postgres-only bulk audit used when SQLite is retired (session=None)."""
+    try:
+        windows = repository.list_settlement_windows_paginated(limit=limit, offset=offset)
+    except Exception as exc:
+        return (
+            {
+                "status": "error",
+                "comparison_status": "error",
+                "limit": limit,
+                "offset": offset,
+                "status_filter": status_filter,
+                "include_details": include_details,
+                "total_checked": 0,
+                "matched_count": 0,
+                "mismatched_count": 0,
+                "not_found_count": 0,
+                "error_count": 1,
+                "rows": [],
+                "error": f"Postgres query failed: {exc}",
+                "checked_at": checked_at,
+            },
+            503,
+        )
+
+    rows: list[dict[str, object]] = []
+    total_checked = len(windows)
+    for window in windows:
+        comparison_status = "postgres_primary"
+        if status_filter and comparison_status != status_filter:
+            continue
+        row: dict[str, object] = {
+            "settlement_id": int(window["id"]),
+            "period_start": window["work_window_start"].isoformat(),
+            "period_end": window["work_window_end"].isoformat(),
+            "status": window["status"],
+            "comparison_status": comparison_status,
+            "mismatch_count": 0,
+        }
+        if include_details:
+            row["mismatches"] = []
+        rows.append(row)
+
+    return (
+        {
+            "status": "ok",
+            "comparison_status": "postgres_primary",
+            "limit": limit,
+            "offset": offset,
+            "status_filter": status_filter,
+            "include_details": include_details,
+            "total_checked": total_checked,
+            "matched_count": 0,
+            "mismatched_count": 0,
+            "not_found_count": 0,
+            "error_count": 0,
+            "rows": rows,
+            "checked_at": checked_at,
+        },
+        200,
+    )
+
+
 def audit_postgres_shadow_settlements(
-    session: Session,
+    session: Session | None,
     *,
     limit: int = 100,
     offset: int = 0,
@@ -449,6 +605,39 @@ def audit_postgres_shadow_settlements(
     include_details: bool = False,
 ) -> tuple[dict[str, object], int]:
     checked_at = datetime.now(UTC).isoformat()
+
+    # Postgres-primary mode: no SQLite session available
+    if session is None:
+        try:
+            repository = get_postgres_shadow_compare_repository()
+        except PostgresShadowCompareError as exc:
+            return (
+                {
+                    "status": "error",
+                    "comparison_status": "error",
+                    "limit": limit,
+                    "offset": offset,
+                    "status_filter": status_filter,
+                    "include_details": include_details,
+                    "total_checked": 0,
+                    "matched_count": 0,
+                    "mismatched_count": 0,
+                    "not_found_count": 0,
+                    "error_count": 1,
+                    "rows": [],
+                    "error": str(exc),
+                    "checked_at": checked_at,
+                },
+                503,
+            )
+        return _postgres_primary_audit(
+            repository,
+            limit=limit,
+            offset=offset,
+            status_filter=status_filter,
+            include_details=include_details,
+            checked_at=checked_at,
+        )
 
     try:
         repository = get_postgres_shadow_compare_repository()

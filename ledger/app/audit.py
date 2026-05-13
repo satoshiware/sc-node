@@ -13,6 +13,11 @@ from sqlalchemy.orm import Session
 from app.delta import compute_user_contribution_deltas
 from app.mapping import parse_identity
 from app.models import MetricSnapshot, User, UserPayout
+from app.config import load_settings
+from app.postgres_db import make_postgres_engine, make_postgres_session_factory
+from app.postgres_delta import compute_user_contribution_deltas_postgres
+from app.postgres_repositories import PostgresLedgerRepository
+from app.runtime_cutover import should_fail_closed_on_postgres_primary
 
 ZERO = Decimal("0")
 
@@ -32,6 +37,28 @@ def _build_snapshot_alignment(
     period_start: datetime,
     period_end: datetime,
 ) -> dict[str, object]:
+    settings = load_settings()
+    
+    # Try Postgres path first if primary session enabled
+    if getattr(settings, "postgres_primary_session_enabled", False):
+        try:
+            postgres_repo = PostgresLedgerRepository(
+                make_postgres_session_factory(make_postgres_engine())
+            )
+            rows = postgres_repo.list_raw_miner_snapshot_counters_up_to(period_end=period_end)
+            if rows:
+                return _build_snapshot_alignment_from_rows(rows, period_start, period_end)
+        except Exception:
+            if should_fail_closed_on_postgres_primary(
+                postgres_primary_session_enabled=settings.postgres_primary_session_enabled,
+                sqlite_retirement_mode_enabled=settings.sqlite_retirement_mode_enabled,
+            ):
+                raise RuntimeError(
+                    "Postgres snapshot alignment read failed while Postgres primary is enabled."
+                )
+            pass  # Fall back to SQLite below
+    
+    # SQLite path
     rows = session.execute(
         select(MetricSnapshot)
         .where(MetricSnapshot.created_at <= period_end)
@@ -43,9 +70,21 @@ def _build_snapshot_alignment(
         )
     ).scalars().all()
 
-    grouped: dict[tuple[str, int], list[MetricSnapshot]] = defaultdict(list)
+    return _build_snapshot_alignment_from_rows(rows, period_start, period_end)
+
+
+def _build_snapshot_alignment_from_rows(
+    rows: list,
+    period_start: datetime,
+    period_end: datetime,
+) -> dict[str, object]:
+    """Build snapshot alignment from row data (works with both SQLite ORM and Postgres dicts)."""
+    grouped: dict[tuple[str, int], list] = defaultdict(list)
     for row in rows:
-        grouped[(row.identity, int(row.channel_id or 0))].append(row)
+        # Handle both SQLite ORM objects and Postgres dicts
+        identity = row.identity if hasattr(row, 'identity') else row['identity']
+        channel_id = int(row.channel_id or 0) if hasattr(row, 'channel_id') else int(row.get('channel_id') or 0)
+        grouped[(identity, channel_id)].append(row)
 
     per_miner: list[dict[str, object]] = []
     latest_per_miner: list[dict[str, object]] = []
@@ -58,27 +97,49 @@ def _build_snapshot_alignment(
     miners_without_in_window_snapshot = 0
 
     for (identity, channel_id), samples in grouped.items():
-        baseline: MetricSnapshot | None = None
-        current: MetricSnapshot | None = None
+        baseline = None
+        current = None
         latest = samples[-1]
 
+        # Extract row data - handle both ORM and dict objects
+        def get_row_data(row):
+            if hasattr(row, 'id'):  # SQLite ORM
+                return {
+                    'id': row.id,
+                    'created_at': row.created_at,
+                    'captured_at': row.created_at,  # SQLite MetricSnapshot doesn't have captured_at
+                    'accepted_shares_total': row.accepted_shares_total,
+                    'accepted_work_total': row.accepted_work_total,
+                }
+            else:  # Postgres dict
+                return {
+                    'id': row.get('id'),
+                    'created_at': row.get('created_at') or row.get('captured_at'),
+                    'captured_at': row.get('captured_at'),
+                    'accepted_shares_total': row.get('accepted_shares_total'),
+                    'accepted_work_total': row.get('accepted_work_total'),
+                }
+        
+        latest_data = get_row_data(latest)
         latest_per_miner.append(
             {
                 "identity": identity,
                 "channel_id": channel_id,
-                "latest_snapshot_id": int(latest.id),
-                "latest_at": latest.created_at.isoformat(),
-                "latest_shares": int(latest.accepted_shares_total or 0),
-                "latest_work": _to_decimal_str(latest.accepted_work_total),
+                "latest_snapshot_id": latest_data['id'],
+                "latest_at": latest_data['created_at'].isoformat() if hasattr(latest_data['created_at'], 'isoformat') else str(latest_data['created_at']),
+                "latest_shares": int(latest_data['accepted_shares_total'] or 0),
+                "latest_work": _to_decimal_str(latest_data['accepted_work_total']),
             }
         )
 
         for sample in samples:
-            if sample.created_at < period_start:
-                baseline = sample
+            sample_data = get_row_data(sample)
+            created_at = sample_data['created_at']
+            if created_at < period_start:
+                baseline = sample_data
                 continue
-            if sample.created_at <= period_end:
-                current = sample
+            if created_at <= period_end:
+                current = sample_data
                 snapshots_in_window += 1
 
         if current is None:
@@ -88,10 +149,10 @@ def _build_snapshot_alignment(
         miners_with_in_window_snapshot += 1
 
         previous = baseline or current
-        previous_shares = int(previous.accepted_shares_total or 0)
-        current_shares = int(current.accepted_shares_total or 0)
-        previous_work = _to_decimal(previous.accepted_work_total)
-        current_work = _to_decimal(current.accepted_work_total)
+        previous_shares = int(previous['accepted_shares_total'] or 0)
+        current_shares = int(current['accepted_shares_total'] or 0)
+        previous_work = _to_decimal(previous['accepted_work_total'])
+        current_work = _to_decimal(current['accepted_work_total'])
 
         shares_reset = current_shares < previous_shares
         work_reset = current_work < previous_work
@@ -109,10 +170,10 @@ def _build_snapshot_alignment(
             {
                 "identity": identity,
                 "channel_id": channel_id,
-                "baseline_snapshot_id": int(previous.id),
-                "baseline_at": previous.created_at.isoformat(),
-                "current_snapshot_id": int(current.id),
-                "current_at": current.created_at.isoformat(),
+                "baseline_snapshot_id": previous['id'],
+                "baseline_at": previous['created_at'].isoformat() if hasattr(previous['created_at'], 'isoformat') else str(previous['created_at']),
+                "current_snapshot_id": current['id'],
+                "current_at": current['created_at'].isoformat() if hasattr(current['created_at'], 'isoformat') else str(current['created_at']),
                 "baseline_shares": previous_shares,
                 "current_shares": current_shares,
                 "share_delta": share_delta,
@@ -142,6 +203,51 @@ def _build_snapshot_alignment(
 
 
 def _build_payout_rows(session: Session, settlement_id: int) -> list[dict[str, object]]:
+    settings = load_settings()
+    
+    # Try Postgres path first if primary session enabled
+    if getattr(settings, "postgres_primary_session_enabled", False):
+        try:
+            postgres_repo = PostgresLedgerRepository(
+                make_postgres_session_factory(make_postgres_engine())
+            )
+            credit_rows = postgres_repo.list_settlement_user_credits_with_users(settlement_id)
+            work_rows = postgres_repo.list_settlement_user_work_with_users(settlement_id)
+            work_by_user: dict[str, dict[str, object]] = {
+                row["username"]: row for row in work_rows
+            }
+            
+            result = []
+            for credit_row in credit_rows:
+                username = credit_row["username"]
+                work_row = work_by_user.get(username, {})
+                
+                # Convert sats back to BTC
+                amount_sats = int(credit_row["amount_sats"] or 0)
+                amount_btc = Decimal(str(amount_sats)) / Decimal("100000000")
+                
+                result.append(
+                    {
+                        "username": username,
+                        "amount_btc": _to_decimal_str(amount_btc),
+                        "status": credit_row["status"],
+                        "payout_fraction": f"{_to_decimal(work_row.get('payout_fraction', 0)):.12f}",
+                        "contribution_value": _to_decimal_str(work_row.get("share_delta", 0)),
+                    }
+                )
+            
+            return result
+        except Exception:
+            if should_fail_closed_on_postgres_primary(
+                postgres_primary_session_enabled=settings.postgres_primary_session_enabled,
+                sqlite_retirement_mode_enabled=settings.sqlite_retirement_mode_enabled,
+            ):
+                raise RuntimeError(
+                    "Postgres payout rows read failed while Postgres primary is enabled."
+                )
+            pass  # Fall back to SQLite below
+    
+    # SQLite fallback
     rows = session.execute(
         select(
             User.username,
@@ -171,6 +277,34 @@ def _build_user_contributions(
     period_start: datetime,
     period_end: datetime,
 ) -> list[dict[str, object]]:
+    settings = load_settings()
+
+    if getattr(settings, "postgres_primary_session_enabled", False):
+        try:
+            postgres_repo = PostgresLedgerRepository(
+                make_postgres_session_factory(make_postgres_engine())
+            )
+            _start = period_start if period_start.tzinfo is not None else period_start.replace(tzinfo=__import__("datetime").timezone.utc)
+            _end = period_end if period_end.tzinfo is not None else period_end.replace(tzinfo=__import__("datetime").timezone.utc)
+            contributions = compute_user_contribution_deltas_postgres(postgres_repo, _start, _end)
+            return [
+                {
+                    "username": username,
+                    "share_delta": int(item.share_delta),
+                    "work_delta": _to_decimal_str(item.work_delta),
+                }
+                for username, item in sorted(contributions.items(), key=lambda entry: entry[0])
+            ]
+        except Exception:
+            if should_fail_closed_on_postgres_primary(
+                postgres_primary_session_enabled=settings.postgres_primary_session_enabled,
+                sqlite_retirement_mode_enabled=settings.sqlite_retirement_mode_enabled,
+            ):
+                raise RuntimeError(
+                    "Postgres user contributions read failed while Postgres primary is enabled."
+                )
+            pass  # Fall back to SQLite below
+
     contributions = compute_user_contribution_deltas(session, period_start, period_end)
     return [
         {

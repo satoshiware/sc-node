@@ -453,3 +453,41 @@ def upsert_snapshot_blocks(
     if created > 0:
         session.flush()
     return created
+
+
+def upsert_blocks_found_postgres(
+    postgres_repo: Any,
+    block_rows: list[dict[str, Any]],
+    *,
+    source_default: str = "translator_blocks_api",
+) -> int:
+    """Insert unique blocks_found rows from a translator blocks response using Postgres repository."""
+    normalized: dict[str, dict[str, Any]] = {}
+    for row in block_rows:
+        item = _normalize_snapshot_block_row(row, source_default=source_default)
+        if item is None:
+            continue
+        blockhash = str(item["blockhash"])
+        if blockhash not in normalized:
+            normalized[blockhash] = item
+
+    if not normalized:
+        return 0
+
+    now_utc_aware = datetime.now(UTC)
+    created = 0
+    for blockhash, row in normalized.items():
+        try:
+            postgres_repo.upsert_block_found(
+                blockhash=blockhash,
+                found_at=row["found_at"].replace(tzinfo=UTC) if row["found_at"].tzinfo is None else row["found_at"],
+                channel_id=int(row["channel_id"]) if row["channel_id"] else None,
+                worker_identity=str(row["worker_identity"]) if row["worker_identity"] else None,
+                source=str(row["source"]),
+                created_at=now_utc_aware,
+            )
+            created += 1
+        except Exception:
+            continue
+    
+    return created

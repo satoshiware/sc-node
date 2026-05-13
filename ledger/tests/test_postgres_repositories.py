@@ -127,6 +127,46 @@ def test_schema_metadata_includes_sqlite_settlement_mapping_column() -> None:
     assert "sqlite_settlement_id" in settlement_columns
 
 
+def test_postgres_repository_block_counter_state_roundtrip() -> None:
+    repository, base_engine, schema_name = _make_repository()
+    try:
+        first = repository.upsert_block_counter_state(
+            channel_id=7,
+            last_blocks_found_total=12,
+        )
+        assert first["channel_id"] == 7
+        assert first["last_blocks_found_total"] == 12
+
+        second = repository.upsert_block_counter_state(
+            channel_id=7,
+            last_blocks_found_total=18,
+        )
+        assert second["id"] == first["id"]
+        assert second["last_blocks_found_total"] == 18
+
+        rows = repository.list_block_counter_state()
+        assert len(rows) == 1
+        assert rows[0]["channel_id"] == 7
+        assert rows[0]["last_blocks_found_total"] == 18
+    finally:
+        _drop_schema(base_engine, schema_name)
+
+
+def test_postgres_repository_summary_methods_empty_state() -> None:
+    repository, base_engine, schema_name = _make_repository()
+    try:
+        detail = repository.get_latest_settlement_detail()
+        summary = repository.get_service_metrics_summary()
+
+        assert detail is None
+        assert summary["settlements_total"] == 0
+        assert summary["payouts_sent_total"] == 0
+        assert summary["payout_failures_total"] == 0
+        assert summary["last_settlement_timestamp"] is None
+    finally:
+        _drop_schema(base_engine, schema_name)
+
+
 def test_postgres_repository_smoke() -> None:
     repository, base_engine, schema_name = _make_repository()
     try:
