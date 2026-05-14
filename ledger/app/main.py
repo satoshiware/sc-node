@@ -2628,6 +2628,33 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
                         fetched_block_rows,
                         source_default="translator_blocks_api",
                     )
+                    # Bridge translator_candidate_blocks → blocks_found.
+                    # The capture proxy writes candidate blocks directly to Postgres but the
+                    # settlement engine only reads from blocks_found, so we promote any
+                    # candidate blocks in the matured window that are not already present.
+                    _matured_start_aware = matured_start if matured_start.tzinfo is not None else matured_start.replace(tzinfo=UTC)
+                    _matured_end_aware = matured_end if matured_end.tzinfo is not None else matured_end.replace(tzinfo=UTC)
+                    try:
+                        candidate_rows = postgres_repo.list_translator_candidate_blocks(
+                            start_time=_matured_start_aware,
+                            end_time=_matured_end_aware,
+                            limit=500,
+                            order="asc",
+                        )
+                        for _cand in candidate_rows:
+                            try:
+                                postgres_repo.upsert_block_found(
+                                    blockhash=str(_cand["blockhash"]),
+                                    found_at=_cand["found_time"],
+                                    channel_id=_cand.get("channel_id"),
+                                    worker_identity=_cand.get("worker_identity"),
+                                    source="translator_candidate_blocks",
+                                    created_at=datetime.now(UTC),
+                                )
+                            except Exception:
+                                pass  # non-fatal; skip duplicate or invalid rows
+                    except Exception:
+                        pass  # non-fatal; settlement still runs on API-fetched blocks
                 except Exception:
                     # Fall back to SQLite if Postgres fails
                     inserted_blocks = upsert_snapshot_blocks(
