@@ -315,6 +315,29 @@ def run_settlement_postgres(
         work_window_end=_as_utc_aware(period_end),
     )
     if existing_settlement is not None:
+        existing_status = str(existing_settlement.get("status") or "")
+        if existing_status == "pending" and defer_on_zero_reward and use_work_accrual:
+            # Recovery path: settlement crashed between creating the pending window and writing
+            # the deferred status. Re-run accrual and finish transitioning to deferred so work
+            # is not permanently lost from the accrual bucket.
+            existing_contributions = compute_user_contribution_deltas_postgres(
+                repository,
+                _as_utc_aware(work_window_start if work_window_start is not None else period_start),
+                _as_utc_aware(work_window_end if work_window_end is not None else period_end),
+            )
+            _add_work_to_accrual_postgres(repository, existing_contributions, now_aware, decimals)
+            _set_settlement_window_state_postgres(
+                repository,
+                settlement_id=int(existing_settlement["id"]),
+                settlement_run_at=now_aware,
+                work_window_start=_as_utc_aware(period_start),
+                work_window_end=_as_utc_aware(period_end),
+                maturity_offset_minutes=int(existing_settlement.get("maturity_offset_minutes") or configured_maturity_offset),
+                status="deferred",
+                total_reward_sats=0,
+                total_work=_q(Decimal(str(existing_settlement.get("total_work") or 0)), decimals),
+                total_shares=int(existing_settlement.get("total_shares") or 0),
+            )
         payout_rows = repository.list_settlement_user_credits_with_users(int(existing_settlement["id"]))
         carry = _get_or_create_carry_postgres(repository)
         return SettlementResult(

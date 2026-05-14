@@ -2133,35 +2133,58 @@ def _read_postgres_latest_settlement() -> dict:
     return build_latest_settlement_payload(repository.get_latest_settlement_detail())
 
 
+def _format_block_row(row: dict[str, object]) -> dict[str, object]:
+    found_time = row.get("found_time")
+    return {
+        "blockhash": row.get("blockhash"),
+        "found_time": found_time.isoformat() if isinstance(found_time, datetime) else None,
+        "found_time_unix": _to_int(row.get("found_time_unix")),
+        "worker_identity": row.get("worker_identity"),
+        "channel_id": _to_int(row.get("channel_id")),
+        "source": row.get("source"),
+        "proof_type": row.get("proof_type"),
+    }
+
+
+def _compute_avg_block_interval_seconds(rows: list[dict[str, object]]) -> float | None:
+    """Compute average seconds between consecutive found_time values.
+
+    ``rows`` must be ordered newest-first (desc). Returns None if fewer than 2 rows.
+    """
+    times: list[datetime] = []
+    for row in rows:
+        ft = row.get("found_time")
+        if isinstance(ft, datetime):
+            times.append(ft)
+    if len(times) < 2:
+        return None
+    # times are desc; compute gaps between consecutive pairs
+    gaps: list[float] = []
+    for i in range(len(times) - 1):
+        delta = times[i] - times[i + 1]
+        gaps.append(abs(delta.total_seconds()))
+    return sum(gaps) / len(gaps)
+
+
 def _read_translator_block_found_stats() -> dict[str, object]:
     repository = _get_postgres_candidate_read_repository()
     now = datetime.now(UTC)
-    latest_rows = repository.list_translator_candidate_blocks(limit=1, order="desc")
-    latest_row = latest_rows[0] if latest_rows else None
+    # Fetch enough rows to compute a meaningful avg interval (up to 50), display top 3
+    recent_rows = repository.list_translator_candidate_blocks(limit=50, order="desc")
 
     def _window_count(hours: int) -> int:
         return repository.count_translator_candidate_blocks(start_time=now - timedelta(hours=hours), end_time=now)
 
-    latest_payload: dict[str, object] | None
-    if latest_row is None:
-        latest_payload = None
-    else:
-        found_time = latest_row.get("found_time")
-        latest_payload = {
-            "blockhash": latest_row.get("blockhash"),
-            "found_time": found_time.isoformat() if isinstance(found_time, datetime) else None,
-            "found_time_unix": _to_int(latest_row.get("found_time_unix")),
-            "worker_identity": latest_row.get("worker_identity"),
-            "channel_id": _to_int(latest_row.get("channel_id")),
-            "source": latest_row.get("source"),
-            "proof_type": latest_row.get("proof_type"),
-        }
+    recent_blocks = [_format_block_row(row) for row in recent_rows[:3]]
+    avg_interval_seconds = _compute_avg_block_interval_seconds(recent_rows)
 
     return {
         "status": "ok",
         "read_source": "postgres.translator_candidate_blocks",
         "generated_at": now.isoformat(),
-        "latest_block_found": latest_payload,
+        "recent_blocks": recent_blocks,
+        "avg_block_interval_seconds": avg_interval_seconds,
+        "avg_block_interval_basis": len(recent_rows),
         "counts": {
             "last_1h": _window_count(1),
             "last_8h": _window_count(8),
@@ -2244,7 +2267,7 @@ def audit_block_found_dashboard() -> HTMLResponse:
         }
         .kpis {
             display: grid;
-            grid-template-columns: repeat(3, minmax(0, 1fr));
+            grid-template-columns: repeat(4, minmax(0, 1fr));
             gap: 10px;
             margin-bottom: 12px;
         }
@@ -2274,7 +2297,10 @@ def audit_block_found_dashboard() -> HTMLResponse:
             gap: 10px;
             margin-top: 8px;
         }
-        @media (max-width: 780px) {
+        @media (max-width: 860px) {
+            .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        }
+        @media (max-width: 540px) {
             .kpis { grid-template-columns: 1fr; }
             .grid { grid-template-columns: 1fr; }
         }
@@ -2292,7 +2318,7 @@ def audit_block_found_dashboard() -> HTMLResponse:
 
         <div class=\"kpis\" id=\"kpis\"></div>
 
-        <section class=\"panel\" id=\"latestPanel\">Loading latest block...</section>
+        <section class=\"panel\" id=\"recentPanel\">Loading recent blocks...</section>
     </div>
 
     <script>
@@ -2312,52 +2338,76 @@ def audit_block_found_dashboard() -> HTMLResponse:
             return `${mst.toISOString().slice(0, 19).replace('T', ' ')} MST`;
         }
 
+        function fmtInterval(seconds) {
+            if (seconds === null || seconds === undefined) return '-';
+            const s = Math.round(Number(seconds));
+            if (Number.isNaN(s)) return '-';
+            if (s < 60) return `${s}s`;
+            const m = Math.floor(s / 60);
+            const rem = s % 60;
+            if (m < 60) return rem > 0 ? `${m}m ${rem}s` : `${m}m`;
+            const h = Math.floor(m / 60);
+            const remM = m % 60;
+            return remM > 0 ? `${h}h ${remM}m` : `${h}h`;
+        }
+
+        function renderBlock(block, idx) {
+            const label = idx === 0 ? 'Latest Found Block' : `Found Block #${idx + 1}`;
+            return `
+                <div style=\"margin-bottom:${idx < 2 ? '14px' : '0'};padding-bottom:${idx < 2 ? '14px' : '0'};border-bottom:${idx < 2 ? '1px solid var(--border)' : 'none'};\">
+                    <div class=\"label\">${label}</div>
+                    <div class=\"mono\" style=\"font-size:0.9rem;margin-bottom:6px;\">${block.blockhash || '-'}</div>
+                    <div class=\"grid\">
+                        <div>
+                            <div class=\"label\">Found Time (MST)</div>
+                            <div>${fmtMst(block.found_time)}</div>
+                        </div>
+                        <div>
+                            <div class=\"label\">Channel</div>
+                            <div>${block.channel_id ?? '-'}</div>
+                        </div>
+                        <div>
+                            <div class=\"label\">Worker Identity</div>
+                            <div class=\"mono\">${block.worker_identity || '-'}</div>
+                        </div>
+                        <div>
+                            <div class=\"label\">Source / Proof Type</div>
+                            <div>${block.source || '-'} / ${block.proof_type || '-'}</div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
         function render(data) {
             const kpis = document.getElementById('kpis');
-            const latestPanel = document.getElementById('latestPanel');
+            const recentPanel = document.getElementById('recentPanel');
             const counts = data.counts || {};
-            const latest = data.latest_block_found;
+            const recent = data.recent_blocks || [];
+            const avgSecs = data.avg_block_interval_seconds;
+            const avgBasis = data.avg_block_interval_basis || 0;
 
             kpis.innerHTML = [
                 ['Blocks in Last Hour', fmtNum(counts.last_1h || 0)],
                 ['Blocks in Last 8 Hours', fmtNum(counts.last_8h || 0)],
                 ['Blocks in Last 24 Hours', fmtNum(counts.last_24h || 0)],
+                ['Avg Time Between Blocks', `${fmtInterval(avgSecs)}<span style=\"font-size:11px;color:var(--muted);font-weight:normal;\"> (last ${fmtNum(avgBasis)})</span>`],
             ].map(([k, v]) => `<div class=\"kpi\"><span class=\"muted\">${k}</span><b>${v}</b></div>`).join('');
 
-            if (!latest) {
-                latestPanel.innerHTML = '<div class=\"label\">Latest Found Block</div><div>No rows found yet.</div>';
+            if (!recent.length) {
+                recentPanel.innerHTML = '<div class=\"label\">Recent Found Blocks</div><div>No rows found yet.</div>';
                 return;
             }
 
-            latestPanel.innerHTML = `
-                <div class=\"label\">Latest Found Block</div>
-                <div class=\"mono\">${latest.blockhash || '-'}</div>
-                <div class=\"grid\">
-                    <div>
-                        <div class=\"label\">Found Time (MST)</div>
-                        <div>${fmtMst(latest.found_time)}</div>
-                    </div>
-                    <div>
-                        <div class=\"label\">Channel</div>
-                        <div>${latest.channel_id ?? '-'}</div>
-                    </div>
-                    <div>
-                        <div class=\"label\">Worker Identity</div>
-                        <div class=\"mono\">${latest.worker_identity || '-'}</div>
-                    </div>
-                    <div>
-                        <div class=\"label\">Source / Proof Type</div>
-                        <div>${latest.source || '-'} / ${latest.proof_type || '-'}</div>
-                    </div>
-                </div>
-                <div class=\"muted\" style=\"margin-top:8px;\">Generated: ${fmtMst(data.generated_at)}</div>
-            `;
+            recentPanel.innerHTML =
+                recent.map((block, idx) => renderBlock(block, idx)).join('') +
+                `<div class=\"muted\" style=\"margin-top:10px;\">Generated: ${fmtMst(data.generated_at)}</div>`;
         }
 
         async function loadData() {
             const res = await fetch('/audit/block-found');
             if (!res.ok) {
-                document.getElementById('latestPanel').textContent = 'Failed to load block-found metrics.';
+                document.getElementById('recentPanel').textContent = 'Failed to load block-found metrics.';
                 document.getElementById('kpis').innerHTML = '';
                 return;
             }
