@@ -270,7 +270,7 @@ def run_settlement_postgres(
     payout_decimals: int | None = None,
     reward_fetcher=fetch_pool_reward,
     defer_on_zero_reward: bool = False,
-    use_work_accrual: bool = False,
+    use_work_accrual: bool = True,
     work_window_start: datetime | None = None,
     work_window_end: datetime | None = None,
 ) -> SettlementResult:
