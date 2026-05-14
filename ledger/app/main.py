@@ -1411,7 +1411,7 @@ def _normalize_postgres_settlement_history_rows(
                 "payout_user_breakdown": payout_user_breakdown,
                 "interval_ratio_rows": _build_interval_ratio_rows(user_contributions),
                 "work_delta_explanation": _build_postgres_work_delta_explanation(
-                    user_work_rows,
+                    user_contributions,
                     previous_cycle_contributions,
                 ),
                 "last_payout_settlement_id": previous_payout_settlement_id,
