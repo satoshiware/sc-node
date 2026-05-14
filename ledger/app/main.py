@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 import os
 import traceback
+from typing import Any
 import uuid
 
 from sqlalchemy import func, or_, select, text
@@ -1186,15 +1187,36 @@ def _postgres_settlement_history_rows(limit: int) -> list[dict[str, object]]:
 
 def _postgres_history_user_contributions(
     user_work_rows: list[dict[str, object]],
+    baseline_work_by_username: dict[str, Decimal] | None = None,
 ) -> list[dict[str, object]]:
-    return [
-        {
-            "username": str(row.get("username") or ""),
-            "share_delta": _to_int(row.get("share_delta")),
-            "work_delta": _to_decimal_str(row.get("work_delta") or "0"),
-        }
-        for row in user_work_rows
-    ]
+    """Build user contribution rows including computed cumulative current_work for baseline chaining.
+    
+    Each row includes:
+    - work_delta: from settlement_user_work table
+    - current_work: computed as baseline + work_delta (for use as next cycle's baseline)
+    - baseline_work: passed from prior cycle (for reference/debugging)
+    """
+    if baseline_work_by_username is None:
+        baseline_work_by_username = {}
+    
+    result = []
+    for row in user_work_rows:
+        username = str(row.get("username") or "")
+        share_delta = _to_int(row.get("share_delta"))
+        work_delta = Decimal(str(row.get("work_delta") or "0"))
+        baseline_work = baseline_work_by_username.get(username, Decimal("0"))
+        current_work = baseline_work + work_delta
+        
+        result.append(
+            {
+                "username": username,
+                "share_delta": share_delta,
+                "work_delta": _to_decimal_str(work_delta),
+                "baseline_work": _to_decimal_str(baseline_work),
+                "current_work": _to_decimal_str(current_work),
+            }
+        )
+    return result
 
 
 def _postgres_history_payout_breakdown(
@@ -1252,6 +1274,13 @@ def _normalize_postgres_settlement_history_rows(
         credit_rows = list(row.get("user_credits") or [])
         user_work_rows = list(row.get("user_work") or [])
         block_rows = list(row.get("settlement_blocks") or [])
+        
+        # Extract baseline_work from previous cycle's computed current_work
+        baseline_work_by_username: dict[str, Decimal] = {
+            str(contrib.get("username") or ""): Decimal(str(contrib.get("current_work") or "0"))
+            for contrib in previous_cycle_contributions
+        }
+        
         summary_snapshot = row.get("summary_snapshot") if isinstance(row.get("summary_snapshot"), dict) else {}
         summary_snapshot_miners = list(row.get("summary_snapshot_miners") or [])
         snapshot_alignment_miners: list[dict[str, object]] = []
@@ -1295,7 +1324,7 @@ def _normalize_postgres_settlement_history_rows(
                     "snapshot_count": snapshot_count,
                 }
             )
-        user_contributions = _postgres_history_user_contributions(user_work_rows)
+        user_contributions = _postgres_history_user_contributions(user_work_rows, baseline_work_by_username)
         payout_user_breakdown = _postgres_history_payout_breakdown(credit_rows, user_work_rows)
         payout_rows_raw = [
             {
@@ -1437,19 +1466,15 @@ def _build_postgres_work_delta_explanation(
 ) -> dict[str, object]:
     """Build work-delta explanation from settlement_user_work rows for the Postgres authoritative path.
 
-    The audit-log path has per-snapshot baseline/current counters; the Postgres history path
-    only stores the aggregated delta per user.  We surface what we have.
+    user_work_rows are already enriched with baseline_work and current_work by _postgres_history_user_contributions,
+    so we just surface those computed values.
     """
-    previous_by_username = {
-        str(row.get("username") or ""): Decimal(str(row.get("work_delta") or "0"))
-        for row in previous_cycle_contributions
-    }
     per_user: list[dict[str, object]] = []
     for work_row in sorted(user_work_rows, key=lambda r: str(r.get("username") or "")):
         username = str(work_row.get("username") or "")
+        baseline_work = Decimal(str(work_row.get("baseline_work") or "0"))
+        current_work = Decimal(str(work_row.get("current_work") or "0"))
         work_delta = Decimal(str(work_row.get("work_delta") or "0"))
-        baseline_work = previous_by_username.get(username, Decimal("0"))
-        current_work = baseline_work + work_delta
         per_user.append(
             {
                 "username": username,
@@ -1467,6 +1492,7 @@ def _build_postgres_work_delta_explanation(
         "source_metric": "accepted_work_total",
         "description": (
             "Work delta read from settlement_user_work table (Postgres authoritative path). "
+            "Baseline is previous cycle's computed current_work. "
             "Per-snapshot baseline/current counters are only available in the audit log."
         ),
         "reset_rule": "negative steps are treated as counter resets and contribute 0",
@@ -2105,6 +2131,247 @@ def _read_sqlite_latest_settlement(session: Session) -> dict:
 def _read_postgres_latest_settlement() -> dict:
     repository = _get_postgres_candidate_read_repository()
     return build_latest_settlement_payload(repository.get_latest_settlement_detail())
+
+
+def _read_translator_block_found_stats() -> dict[str, object]:
+    repository = _get_postgres_candidate_read_repository()
+    now = datetime.now(UTC)
+    latest_rows = repository.list_translator_candidate_blocks(limit=1, order="desc")
+    latest_row = latest_rows[0] if latest_rows else None
+
+    def _window_count(hours: int) -> int:
+        return repository.count_translator_candidate_blocks(start_time=now - timedelta(hours=hours), end_time=now)
+
+    latest_payload: dict[str, object] | None
+    if latest_row is None:
+        latest_payload = None
+    else:
+        found_time = latest_row.get("found_time")
+        latest_payload = {
+            "blockhash": latest_row.get("blockhash"),
+            "found_time": found_time.isoformat() if isinstance(found_time, datetime) else None,
+            "found_time_unix": _to_int(latest_row.get("found_time_unix")),
+            "worker_identity": latest_row.get("worker_identity"),
+            "channel_id": _to_int(latest_row.get("channel_id")),
+            "source": latest_row.get("source"),
+            "proof_type": latest_row.get("proof_type"),
+        }
+
+    return {
+        "status": "ok",
+        "read_source": "postgres.translator_candidate_blocks",
+        "generated_at": now.isoformat(),
+        "latest_block_found": latest_payload,
+        "counts": {
+            "last_1h": _window_count(1),
+            "last_8h": _window_count(8),
+            "last_24h": _window_count(24),
+        },
+    }
+
+
+@app.get("/audit/block-found")
+def audit_block_found() -> JSONResponse:
+    try:
+        return JSONResponse(status_code=200, content=_read_translator_block_found_stats())
+    except Exception as exc:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "error",
+                "error": "Unable to read translator candidate blocks.",
+                "details": str(exc),
+            },
+        )
+
+
+@app.get("/audit/block-found/dashboard", response_class=HTMLResponse)
+def audit_block_found_dashboard() -> HTMLResponse:
+    html = """<!doctype html>
+<html lang=\"en\">
+<head>
+    <meta charset=\"utf-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <title>Block Found Dashboard</title>
+    <style>
+        :root {
+            --bg0: #f4f1ea;
+            --bg1: #e8dcc8;
+            --panel: #fffdfa;
+            --ink: #1f1a15;
+            --muted: #6a5c4d;
+            --border: #d7c8b3;
+            --accent: #0f5c78;
+            --shadow: 0 10px 30px rgba(34, 26, 15, 0.12);
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            color: var(--ink);
+            font-family: Georgia, \"Times New Roman\", serif;
+            background:
+                radial-gradient(1300px 700px at -10% -20%, #f8edd6 10%, transparent 60%),
+                radial-gradient(900px 500px at 120% -10%, #d2e8ef 10%, transparent 55%),
+                linear-gradient(180deg, var(--bg0), var(--bg1));
+            min-height: 100vh;
+        }
+        .wrap {
+            max-width: 980px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+        .top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+        h1 {
+            margin: 0;
+            font-size: clamp(1.3rem, 2.6vw, 1.9rem);
+            letter-spacing: 0.3px;
+        }
+        .muted { color: var(--muted); font-size: 0.95rem; }
+        .btn {
+            background: var(--accent);
+            color: #fff;
+            border: 0;
+            border-radius: 10px;
+            padding: 10px 14px;
+            cursor: pointer;
+            box-shadow: var(--shadow);
+        }
+        .kpis {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+        .kpi {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 10px 12px;
+            box-shadow: var(--shadow);
+        }
+        .kpi b { display: block; font-size: 1.2rem; margin-top: 4px; }
+        .panel {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            box-shadow: var(--shadow);
+            padding: 12px;
+        }
+        .label { font-size: 12px; color: var(--muted); margin-bottom: 2px; }
+        .mono {
+            font-family: ui-monospace, Menlo, Consolas, monospace;
+            word-break: break-all;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+            margin-top: 8px;
+        }
+        @media (max-width: 780px) {
+            .kpis { grid-template-columns: 1fr; }
+            .grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <div class=\"wrap\">
+        <div class=\"top\">
+            <div>
+                <h1>Block Found Dashboard</h1>
+                <div class=\"muted\">From translator_candidate_blocks</div>
+            </div>
+            <button id=\"refreshBtn\" class=\"btn\">Refresh</button>
+        </div>
+
+        <div class=\"kpis\" id=\"kpis\"></div>
+
+        <section class=\"panel\" id=\"latestPanel\">Loading latest block...</section>
+    </div>
+
+    <script>
+        function fmtNum(value) {
+            const n = Number(value || 0);
+            if (Number.isNaN(n)) return '-';
+            return n.toLocaleString();
+        }
+
+        function fmtMst(value) {
+            if (!value) return '-';
+            const raw = String(value).trim();
+            const hasTz = /([zZ]|[+-]\\d{2}:\\d{2})$/.test(raw);
+            const utc = new Date(hasTz ? raw : `${raw}Z`);
+            if (Number.isNaN(utc.getTime())) return value;
+            const mst = new Date(utc.getTime() - 7 * 60 * 60 * 1000);
+            return `${mst.toISOString().slice(0, 19).replace('T', ' ')} MST`;
+        }
+
+        function render(data) {
+            const kpis = document.getElementById('kpis');
+            const latestPanel = document.getElementById('latestPanel');
+            const counts = data.counts || {};
+            const latest = data.latest_block_found;
+
+            kpis.innerHTML = [
+                ['Blocks in Last Hour', fmtNum(counts.last_1h || 0)],
+                ['Blocks in Last 8 Hours', fmtNum(counts.last_8h || 0)],
+                ['Blocks in Last 24 Hours', fmtNum(counts.last_24h || 0)],
+            ].map(([k, v]) => `<div class=\"kpi\"><span class=\"muted\">${k}</span><b>${v}</b></div>`).join('');
+
+            if (!latest) {
+                latestPanel.innerHTML = '<div class=\"label\">Latest Found Block</div><div>No rows found yet.</div>';
+                return;
+            }
+
+            latestPanel.innerHTML = `
+                <div class=\"label\">Latest Found Block</div>
+                <div class=\"mono\">${latest.blockhash || '-'}</div>
+                <div class=\"grid\">
+                    <div>
+                        <div class=\"label\">Found Time (MST)</div>
+                        <div>${fmtMst(latest.found_time)}</div>
+                    </div>
+                    <div>
+                        <div class=\"label\">Channel</div>
+                        <div>${latest.channel_id ?? '-'}</div>
+                    </div>
+                    <div>
+                        <div class=\"label\">Worker Identity</div>
+                        <div class=\"mono\">${latest.worker_identity || '-'}</div>
+                    </div>
+                    <div>
+                        <div class=\"label\">Source / Proof Type</div>
+                        <div>${latest.source || '-'} / ${latest.proof_type || '-'}</div>
+                    </div>
+                </div>
+                <div class=\"muted\" style=\"margin-top:8px;\">Generated: ${fmtMst(data.generated_at)}</div>
+            `;
+        }
+
+        async function loadData() {
+            const res = await fetch('/audit/block-found');
+            if (!res.ok) {
+                document.getElementById('latestPanel').textContent = 'Failed to load block-found metrics.';
+                document.getElementById('kpis').innerHTML = '';
+                return;
+            }
+            const data = await res.json();
+            render(data);
+        }
+
+        document.getElementById('refreshBtn').addEventListener('click', loadData);
+        loadData();
+    </script>
+</body>
+</html>
+"""
+    return HTMLResponse(content=html)
 
 
 @app.get("/postgres-shadow/settlements/{settlement_id}/compare")

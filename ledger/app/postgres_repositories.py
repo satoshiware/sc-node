@@ -449,6 +449,23 @@ class PostgresLedgerRepository:
             statement = statement.where(translator_candidate_blocks.c.found_time < end_time)
         return self._select_all(statement.order_by(*order_by).limit(limit))
 
+    def count_translator_candidate_blocks(
+        self,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+    ) -> int:
+        _require_tzaware("start_time", start_time)
+        _require_tzaware("end_time", end_time)
+
+        statement = select(func.count(translator_candidate_blocks.c.id))
+        if start_time is not None:
+            statement = statement.where(translator_candidate_blocks.c.found_time >= start_time)
+        if end_time is not None:
+            statement = statement.where(translator_candidate_blocks.c.found_time < end_time)
+
+        with self.session_factory() as session:
+            return int(session.execute(statement).scalar_one() or 0)
+
     def get_translator_candidate_block_by_hash(self, blockhash: str) -> dict[str, Any] | None:
         return self._select_one_or_none(
             select(translator_candidate_blocks).where(
