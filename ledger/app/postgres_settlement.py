@@ -80,6 +80,13 @@ def _apply_accrual_to_contributions_postgres(
     repository: PostgresLedgerRepository,
     user_contributions: dict[str, UserContribution],
 ) -> dict[str, UserContribution]:
+    """Merge accrual from deferred cycles into current contributions.
+    
+    For each user:
+    - If they have work_accrual_bucket.accumulated_work > 0: 
+      effective_work_delta = current_work_delta + accumulated_work
+    - This effective work_delta is used for payout ratio calculation
+    """
     enhanced: dict[str, UserContribution] = {
         username: UserContribution(
             username=username,
@@ -90,6 +97,7 @@ def _apply_accrual_to_contributions_postgres(
     }
 
     accrual_rows = repository.list_all_work_accrual_buckets()
+    accrual_merge_count = 0
     for bucket in accrual_rows:
         accrued = Decimal(str(bucket.get("accumulated_work") or 0))
         if accrued <= ZERO:
@@ -99,19 +107,29 @@ def _apply_accrual_to_contributions_postgres(
         if user is None:
             continue
 
-        existing = enhanced.get(user["username"])
+        username = user.get("username", "")
+        existing = enhanced.get(username)
         if existing is None:
-            enhanced[user["username"]] = UserContribution(
-                username=user["username"],
+            enhanced[username] = UserContribution(
+                username=username,
                 share_delta=0,
                 work_delta=accrued,
             )
-            continue
+        else:
+            new_work_delta = existing.work_delta + accrued
+            enhanced[username] = UserContribution(
+                username=username,
+                share_delta=existing.share_delta,
+                work_delta=new_work_delta,
+            )
+        accrual_merge_count += 1
 
-        enhanced[user["username"]] = UserContribution(
-            username=user["username"],
-            share_delta=existing.share_delta,
-            work_delta=existing.work_delta + accrued,
+    if accrual_merge_count > 0:
+        import sys
+        print(
+            f"[ACCRUAL MERGE] Merged {accrual_merge_count} user accruals into contributions. "
+            f"Details: {[(u, str(c.work_delta)) for u, c in sorted(enhanced.items())][:5]}",
+            file=sys.stderr,
         )
 
     return enhanced
@@ -453,7 +471,17 @@ def run_settlement_postgres(
         )
 
     if use_work_accrual:
+        import sys
+        print(
+            f"[SETTLEMENT] use_work_accrual=True: applying accrual. "
+            f"Current contributions before merge: {[(u, str(c.work_delta)) for u, c in sorted(user_contributions.items())][:5]}",
+            file=sys.stderr,
+        )
         user_contributions = _apply_accrual_to_contributions_postgres(repository, user_contributions)
+        print(
+            f"[SETTLEMENT] After accrual merge: {[(u, str(c.work_delta)) for u, c in sorted(user_contributions.items())][:5]}",
+            file=sys.stderr,
+        )
 
     carry = _get_or_create_carry_postgres(repository)
     previous_carry = _q(Decimal(str(carry.get("carry_btc") or 0)), decimals)
@@ -468,6 +496,11 @@ def run_settlement_postgres(
         str(row["username"]): _q(Decimal(str(row["payout_fraction"])), 18)
         for row in allocation_rows
     }
+    import sys
+    print(
+        f"[SETTLEMENT] Payout fractions built: {[(u, str(payout_fraction_by_username[u])) for u in sorted(payout_fraction_by_username.keys())][:5]}",
+        file=sys.stderr,
+    )
     users_by_username = _persist_settlement_user_work_rows_postgres(
         repository,
         settlement_id=int(settlement["id"]),
