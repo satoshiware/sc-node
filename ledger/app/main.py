@@ -3255,14 +3255,15 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
                     sats = int(rewards_sats_by_hash.get(str(_r["blockhash"]), 0) or 0)
                     total_sats += sats
                     _r["reward_sats"] = sats
-                    try:
-                        _pg_block_repo.upsert_block_reward(
-                            blockhash=str(_r["blockhash"]),
-                            reward_sats=sats,
-                            fetched_at=now_utc_aware,
-                        )
-                    except Exception:
-                        pass  # non-fatal; reward counted in total_sats regardless
+                    if sats > 0:
+                        try:
+                            _pg_block_repo.upsert_block_reward(
+                                blockhash=str(_r["blockhash"]),
+                                reward_sats=sats,
+                                fetched_at=now_utc_aware,
+                            )
+                        except Exception:
+                            pass  # non-fatal; reward counted in total_sats regardless
                 # Also update pg_matured_blocks with resolved reward_sats for linking
                 for _r in _pg_matured_blocks:
                     _r["reward_sats"] = int(rewards_sats_by_hash.get(str(_r["blockhash"]), 0) or 0)
