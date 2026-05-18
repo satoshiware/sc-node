@@ -2424,6 +2424,471 @@ def audit_block_found_dashboard() -> HTMLResponse:
     return HTMLResponse(content=html)
 
 
+def _read_matured_window_data() -> dict[str, object]:
+    settings = load_settings()
+    repository = _get_postgres_candidate_read_repository()
+    now = datetime.now(UTC)
+
+    latest_window = repository.get_latest_settlement_window()
+    if latest_window is None:
+        return {
+            "status": "no_data",
+            "message": "No settlement windows found.",
+            "generated_at": now.isoformat(),
+        }
+
+    settlement_id = int(latest_window["id"])
+    settlement_blocks_rows = repository.list_settlement_blocks(settlement_id)
+    block_hashes = [str(row["blockhash"]) for row in settlement_blocks_rows if row.get("blockhash")]
+
+    stored_rewards: dict[str, dict[str, Any]] = {}
+    for bh in block_hashes:
+        reward_row = repository.get_block_reward(bh)
+        if reward_row is not None:
+            stored_rewards[bh] = reward_row
+
+    live_rewards: dict[str, int] = {}
+    live_api_status = "ok"
+    live_api_error: str | None = None
+    try:
+        if block_hashes:
+            live_rewards = fetch_block_rewards_by_hashes(block_hashes)
+    except PoolApiError as exc:
+        live_api_status = "error"
+        live_api_error = str(exc)
+    except Exception as exc:
+        live_api_status = "error"
+        live_api_error = f"Unexpected error: {exc}"
+
+    blocks: list[dict[str, object]] = []
+    total_stored_reward_sats = 0
+    total_live_reward_sats = 0
+    mismatch_count = 0
+
+    for row in settlement_blocks_rows:
+        bh = str(row.get("blockhash") or "")
+        settlement_reward_sats = int(row.get("reward_sats") or 0)
+
+        reward_row = stored_rewards.get(bh)
+        stored_reward_sats: int | None = int(reward_row["reward_sats"]) if reward_row else None
+        stored_fetched_at = reward_row.get("fetched_at") if reward_row else None
+
+        live_reward_sats: int | None = live_rewards.get(bh) if live_api_status == "ok" else None
+
+        if live_api_status == "error":
+            block_status = "api_error"
+        elif live_reward_sats is None or live_reward_sats <= 0:
+            block_status = "missing"
+        elif stored_reward_sats is not None and live_reward_sats != stored_reward_sats:
+            block_status = "mismatch"
+            mismatch_count += 1
+        else:
+            block_status = "confirmed"
+
+        if stored_reward_sats:
+            total_stored_reward_sats += stored_reward_sats
+        if live_reward_sats:
+            total_live_reward_sats += live_reward_sats
+
+        found_at = row.get("found_at")
+        blocks.append({
+            "blockhash": bh,
+            "found_at": found_at.isoformat() if isinstance(found_at, datetime) else None,
+            "channel_id": _to_int(row.get("channel_id")),
+            "worker_identity": row.get("worker_identity"),
+            "source": row.get("source"),
+            "settlement_reward_sats": settlement_reward_sats,
+            "stored_reward_sats": stored_reward_sats,
+            "stored_fetched_at": (
+                stored_fetched_at.isoformat() if isinstance(stored_fetched_at, datetime) else None
+            ),
+            "live_reward_sats": live_reward_sats,
+            "status": block_status,
+        })
+
+    work_window_start = latest_window.get("work_window_start")
+    work_window_end = latest_window.get("work_window_end")
+    settlement_run_at = latest_window.get("settlement_run_at")
+
+    return {
+        "status": "ok",
+        "generated_at": now.isoformat(),
+        "live_api_status": live_api_status,
+        "live_api_error": live_api_error,
+        "settlement": {
+            "id": settlement_id,
+            "status": latest_window.get("status"),
+            "work_window_start": (
+                work_window_start.isoformat() if isinstance(work_window_start, datetime) else None
+            ),
+            "work_window_end": (
+                work_window_end.isoformat() if isinstance(work_window_end, datetime) else None
+            ),
+            "maturity_offset_minutes": latest_window.get("maturity_offset_minutes"),
+            "total_reward_sats": int(latest_window.get("total_reward_sats") or 0),
+            "settlement_run_at": (
+                settlement_run_at.isoformat() if isinstance(settlement_run_at, datetime) else None
+            ),
+        },
+        "block_count": len(blocks),
+        "total_stored_reward_sats": total_stored_reward_sats,
+        "total_live_reward_sats": total_live_reward_sats if live_api_status == "ok" else None,
+        "mismatch_count": mismatch_count,
+        "blocks": blocks,
+    }
+
+
+@app.get("/audit/matured-window")
+def audit_matured_window() -> JSONResponse:
+    try:
+        return JSONResponse(status_code=200, content=_read_matured_window_data())
+    except Exception as exc:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "error",
+                "error": "Unable to read matured window data.",
+                "details": str(exc),
+            },
+        )
+
+
+@app.get("/audit/matured-window/dashboard", response_class=HTMLResponse)
+def audit_matured_window_dashboard() -> HTMLResponse:
+    html = """<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Matured Window Dashboard</title>
+    <style>
+        :root {
+            --bg0: #f4f1ea;
+            --bg1: #e8dcc8;
+            --panel: #fffdfa;
+            --ink: #1f1a15;
+            --muted: #6a5c4d;
+            --border: #d7c8b3;
+            --accent: #0f5c78;
+            --shadow: 0 10px 30px rgba(34, 26, 15, 0.12);
+            --ok: #1a7a3f;
+            --ok-bg: #e6f4ec;
+            --warn: #7a5c1a;
+            --warn-bg: #fef6e4;
+            --err: #7a1a1a;
+            --err-bg: #fde8e8;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            color: var(--ink);
+            font-family: Georgia, "Times New Roman", serif;
+            background:
+                radial-gradient(1300px 700px at -10% -20%, #f8edd6 10%, transparent 60%),
+                radial-gradient(900px 500px at 120% -10%, #d2e8ef 10%, transparent 55%),
+                linear-gradient(180deg, var(--bg0), var(--bg1));
+            min-height: 100vh;
+        }
+        .wrap { max-width: 1100px; margin: 0 auto; padding: 24px; }
+        .top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+        h1 { margin: 0; font-size: clamp(1.3rem, 2.6vw, 1.9rem); letter-spacing: 0.3px; }
+        .muted { color: var(--muted); font-size: 0.95rem; }
+        .btn {
+            background: var(--accent);
+            color: #fff;
+            border: 0;
+            border-radius: 10px;
+            padding: 10px 14px;
+            cursor: pointer;
+            box-shadow: var(--shadow);
+        }
+        .kpis {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+        .kpi {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 10px 12px;
+            box-shadow: var(--shadow);
+        }
+        .kpi b { display: block; font-size: 1.2rem; margin-top: 4px; }
+        .panel {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            box-shadow: var(--shadow);
+            padding: 16px;
+        }
+        .panel-title {
+            font-size: 1rem;
+            font-weight: bold;
+            margin-bottom: 12px;
+        }
+        .label { font-size: 12px; color: var(--muted); margin-bottom: 2px; }
+        .mono {
+            font-family: ui-monospace, Menlo, Consolas, monospace;
+            word-break: break-all;
+        }
+        .badge {
+            display: inline-block;
+            border-radius: 6px;
+            padding: 2px 8px;
+            font-size: 0.82rem;
+            font-family: ui-monospace, Menlo, Consolas, monospace;
+            font-weight: bold;
+        }
+        .badge-confirmed { background: var(--ok-bg); color: var(--ok); }
+        .badge-missing { background: var(--err-bg); color: var(--err); }
+        .badge-mismatch { background: var(--warn-bg); color: var(--warn); }
+        .badge-api_error { background: var(--err-bg); color: var(--err); }
+        .block-row {
+            border-bottom: 1px solid var(--border);
+            padding: 14px 0;
+        }
+        .block-row:last-child { border-bottom: none; padding-bottom: 0; }
+        .block-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+        .block-num {
+            font-size: 0.8rem;
+            color: var(--muted);
+            min-width: 28px;
+        }
+        .block-hash {
+            font-family: ui-monospace, Menlo, Consolas, monospace;
+            font-size: 0.85rem;
+            word-break: break-all;
+            flex: 1;
+        }
+        .block-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 8px 12px;
+        }
+        .reward-cell { }
+        .reward-val { font-size: 1rem; font-weight: bold; }
+        .reward-btc { font-size: 0.78rem; color: var(--muted); }
+        .window-info {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 10px;
+            margin-bottom: 14px;
+        }
+        .info-card {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 10px 12px;
+            box-shadow: var(--shadow);
+        }
+        @media (max-width: 900px) {
+            .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .window-info { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .block-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        }
+        @media (max-width: 540px) {
+            .kpis { grid-template-columns: 1fr; }
+            .window-info { grid-template-columns: 1fr; }
+            .block-grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <div class="wrap">
+        <div class="top">
+            <div>
+                <h1>Matured Window Dashboard</h1>
+                <div class="muted" id="subtitle">Last processed settlement window</div>
+            </div>
+            <button id="refreshBtn" class="btn">Refresh</button>
+        </div>
+
+        <div class="window-info" id="windowInfo"></div>
+        <div class="kpis" id="kpis"></div>
+        <section class="panel" id="blocksPanel">Loading...</section>
+    </div>
+
+    <script>
+        const SATS_PER_BTC = 100_000_000;
+
+        function fmtMst(value) {
+            if (!value) return '-';
+            const raw = String(value).trim();
+            const hasTz = /([zZ]|[+-]\\d{2}:\\d{2})$/.test(raw);
+            const utc = new Date(hasTz ? raw : raw + 'Z');
+            if (Number.isNaN(utc.getTime())) return value;
+            const mst = new Date(utc.getTime() - 7 * 60 * 60 * 1000);
+            return mst.toISOString().slice(0, 19).replace('T', ' ') + ' MST';
+        }
+
+        function fmtSats(sats) {
+            if (sats === null || sats === undefined) return '-';
+            const n = Number(sats);
+            if (Number.isNaN(n)) return '-';
+            const btc = (n / SATS_PER_BTC).toFixed(8);
+            return `${n.toLocaleString()} sats`;
+        }
+
+        function fmtBtc(sats) {
+            if (sats === null || sats === undefined) return '';
+            const n = Number(sats);
+            if (Number.isNaN(n)) return '';
+            return (n / SATS_PER_BTC).toFixed(8) + ' BTC';
+        }
+
+        function badge(status) {
+            const labels = {
+                confirmed: '✓ confirmed',
+                missing: '✗ missing',
+                mismatch: '⚠ mismatch',
+                api_error: '✗ api error',
+            };
+            return `<span class="badge badge-${status}">${labels[status] || status}</span>`;
+        }
+
+        function renderBlock(block, idx) {
+            const rewardFields = [
+                { label: 'Settlement Reward', sats: block.settlement_reward_sats },
+                { label: 'Stored Reward (cache)', sats: block.stored_reward_sats },
+                { label: 'Live Reward (API)', sats: block.live_reward_sats },
+            ];
+            const rewardCells = rewardFields.map(f => `
+                <div class="reward-cell">
+                    <div class="label">${f.label}</div>
+                    <div class="reward-val">${fmtSats(f.sats)}</div>
+                    <div class="reward-btc">${fmtBtc(f.sats)}</div>
+                </div>
+            `).join('');
+
+            return `
+                <div class="block-row">
+                    <div class="block-header">
+                        <span class="block-num">#${idx + 1}</span>
+                        <span class="block-hash">${block.blockhash || '-'}</span>
+                        ${badge(block.status)}
+                    </div>
+                    <div class="block-grid">
+                        <div>
+                            <div class="label">Found At (MST)</div>
+                            <div>${fmtMst(block.found_at)}</div>
+                        </div>
+                        <div>
+                            <div class="label">Channel</div>
+                            <div>${block.channel_id ?? '-'}</div>
+                        </div>
+                        <div>
+                            <div class="label">Worker Identity</div>
+                            <div class="mono" style="font-size:0.85rem;">${block.worker_identity || '-'}</div>
+                        </div>
+                        ${rewardCells}
+                        ${block.stored_fetched_at ? `
+                        <div>
+                            <div class="label">Reward Cached At (MST)</div>
+                            <div>${fmtMst(block.stored_fetched_at)}</div>
+                        </div>` : ''}
+                        <div>
+                            <div class="label">Source</div>
+                            <div>${block.source || '-'}</div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function render(data) {
+            const windowInfo = document.getElementById('windowInfo');
+            const kpis = document.getElementById('kpis');
+            const blocksPanel = document.getElementById('blocksPanel');
+            const subtitle = document.getElementById('subtitle');
+
+            if (data.status === 'no_data') {
+                windowInfo.innerHTML = '';
+                kpis.innerHTML = '';
+                blocksPanel.innerHTML = '<div class="label">No settlement windows found yet.</div>';
+                return;
+            }
+
+            const s = data.settlement || {};
+            subtitle.textContent = `Settlement #${s.id || '?'} · status: ${s.status || '?'}`;
+
+            const liveStatus = data.live_api_status === 'ok'
+                ? '<span style="color:var(--ok);font-weight:bold;">✓ live API ok</span>'
+                : `<span style="color:var(--err);font-weight:bold;">✗ API error</span>`;
+
+            windowInfo.innerHTML = [
+                ['Window Start', fmtMst(s.work_window_start)],
+                ['Window End', fmtMst(s.work_window_end)],
+                [`Maturity Offset`, `${s.maturity_offset_minutes ?? '-'} min`],
+                ['Settlement Run At', fmtMst(s.settlement_run_at)],
+                ['Live API Status', liveStatus],
+                data.live_api_error ? ['API Error', `<span style="color:var(--err);font-size:0.85rem;">${data.live_api_error}</span>`] : null,
+            ].filter(Boolean).map(([k, v]) => `
+                <div class="info-card">
+                    <div class="label">${k}</div>
+                    <div>${v}</div>
+                </div>
+            `).join('');
+
+            const totalLive = data.total_live_reward_sats !== null && data.total_live_reward_sats !== undefined
+                ? `${fmtSats(data.total_live_reward_sats)}<div style="font-size:0.75rem;color:var(--muted);font-weight:normal;">${fmtBtc(data.total_live_reward_sats)}</div>`
+                : '<span style="color:var(--muted);">N/A</span>';
+
+            kpis.innerHTML = [
+                ['Blocks in Window', String(data.block_count || 0)],
+                ['Stored Total Reward', `${fmtSats(data.total_stored_reward_sats)}<div style="font-size:0.75rem;color:var(--muted);font-weight:normal;">${fmtBtc(data.total_stored_reward_sats)}</div>`],
+                ['Live Total Reward', totalLive],
+                ['Mismatches', String(data.mismatch_count || 0)],
+            ].map(([k, v]) => `<div class="kpi"><span class="muted">${k}</span><b>${v}</b></div>`).join('');
+
+            const blocks = data.blocks || [];
+            if (!blocks.length) {
+                blocksPanel.innerHTML = '<div class="panel-title">Blocks in Window</div><div>No blocks found in this settlement window.</div>';
+                return;
+            }
+
+            blocksPanel.innerHTML =
+                `<div class="panel-title">Blocks in Window (${blocks.length})</div>` +
+                blocks.map((b, i) => renderBlock(b, i)).join('') +
+                `<div class="muted" style="margin-top:12px;font-size:0.88rem;">Generated: ${fmtMst(data.generated_at)}</div>`;
+        }
+
+        async function loadData() {
+            document.getElementById('blocksPanel').textContent = 'Loading...';
+            try {
+                const res = await fetch('/audit/matured-window');
+                if (!res.ok) {
+                    document.getElementById('blocksPanel').textContent = 'Failed to load matured window data.';
+                    return;
+                }
+                const data = await res.json();
+                render(data);
+            } catch (e) {
+                document.getElementById('blocksPanel').textContent = 'Error: ' + e.message;
+            }
+        }
+
+        document.getElementById('refreshBtn').addEventListener('click', loadData);
+        loadData();
+    </script>
+</body>
+</html>
+"""
+    return HTMLResponse(content=html)
+
+
 @app.get("/postgres-shadow/settlements/{settlement_id}/compare")
 @app.get("/v1/postgres-shadow/settlements/{settlement_id}/compare")
 def compare_postgres_shadow_endpoint(settlement_id: int) -> JSONResponse:
