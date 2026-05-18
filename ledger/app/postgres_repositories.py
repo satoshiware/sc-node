@@ -386,7 +386,10 @@ class PostgresLedgerRepository:
             .on_conflict_do_update(
                 index_elements=[blocks_found.c.blockhash],
                 set_={
-                    "found_at": found_at,
+                    # Keep the earliest known found_at so that moving the timestamp
+                    # forward (e.g. from a later candidate-bridge run) cannot push the
+                    # block outside the retry window (found_at < matured_end).
+                    "found_at": func.least(blocks_found.c.found_at, found_at),
                     "channel_id": channel_id,
                     "worker_identity": worker_identity,
                     "source": source,
@@ -511,6 +514,26 @@ class PostgresLedgerRepository:
         return self._select_one_or_none(
             select(block_rewards).where(block_rewards.c.blockhash == blockhash)
         )
+
+    def update_settlement_block_reward(self, *, blockhash: str, reward_sats: int) -> bool:
+        """Update reward_sats on settlement_blocks rows for this blockhash that still have no reward.
+
+        Called when a retry fetch resolves the reward so the block stops appearing
+        in list_retry_blocks (which filters on settlement_blocks.reward_sats <= 0).
+        Returns True if at least one row was updated.
+        """
+        stmt = (
+            update(settlement_blocks)
+            .where(
+                settlement_blocks.c.blockhash == blockhash,
+                settlement_blocks.c.reward_sats <= 0,
+            )
+            .values(reward_sats=reward_sats)
+        )
+        with self.session_factory() as session:
+            result = session.execute(stmt)
+            session.commit()
+            return (result.rowcount or 0) > 0
 
     def upsert_settlement_window(
         self,

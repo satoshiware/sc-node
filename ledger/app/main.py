@@ -3264,6 +3264,16 @@ def _execute_settlement_cycle(*, force_settlement: bool = False) -> dict:
                             )
                         except Exception:
                             pass  # non-fatal; reward counted in total_sats regardless
+                        # Retry blocks: update settlement_blocks.reward_sats so
+                        # list_retry_blocks stops returning this block on future cycles.
+                        if str(_r["blockhash"]) not in current_matured_hash_set:
+                            try:
+                                _pg_block_repo.update_settlement_block_reward(
+                                    blockhash=str(_r["blockhash"]),
+                                    reward_sats=sats,
+                                )
+                            except Exception:
+                                pass  # non-fatal
                 # Also update pg_matured_blocks with resolved reward_sats for linking
                 for _r in _pg_matured_blocks:
                     _r["reward_sats"] = int(rewards_sats_by_hash.get(str(_r["blockhash"]), 0) or 0)

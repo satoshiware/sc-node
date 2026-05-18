@@ -313,7 +313,10 @@ def test_execute_settlement_cycle_tolerates_slightly_early_due_tick(monkeypatch,
     monkeypatch.setenv("PAYOUT_INTERVAL_MINUTES", "6")
     monkeypatch.delenv("TRANSLATOR_CHANNELS_URL", raising=False)
     monkeypatch.setattr("app.main.datetime", _FixedDateTime)
-    monkeypatch.setattr("app.main.poll_metrics_once", lambda session, api_url: 0)
+    monkeypatch.setattr(
+        "app.main.poll_metrics_once",
+        lambda session, api_url, **kwargs: 0,
+    )
     monkeypatch.setattr(
         "app.main.run_settlement",
         lambda session, now, interval_minutes, payout_decimals, reward_fetcher=None, **kwargs: SettlementResult(
@@ -672,7 +675,10 @@ def test_run_settlement_cycle_defers_and_accrues_when_rewards_missing(monkeypatc
     monkeypatch.setenv("DRY_RUN", "true")
     monkeypatch.delenv("TRANSLATOR_CHANNELS_URL", raising=False)
 
-    monkeypatch.setattr("app.main.poll_metrics_once", lambda session, api_url: 0)
+    monkeypatch.setattr(
+        "app.main.poll_metrics_once",
+        lambda session, api_url, **kwargs: 0,
+    )
     monkeypatch.setattr(
         "app.main.fetch_blocks_found_in_window",
         lambda start, end: [
@@ -821,6 +827,126 @@ def test_run_settlement_cycle_defers_on_partial_reward_subset(monkeypatch, tmp_p
         user = session.query(User).filter(User.username == "alice").one()
         bucket = session.query(WorkAccrualBucket).filter(WorkAccrualBucket.user_id == user.id).one()
         assert Decimal(str(bucket.accumulated_work)) == Decimal("160.00000000")
+
+
+def test_run_settlement_cycle_straight_fetch_rewards_by_matured_hash(monkeypatch, tmp_path) -> None:
+    db_file = tmp_path / "run_cycle_block_events_straight_fetch.db"
+    log_file = tmp_path / "run_cycle_block_events_straight_fetch_audit.jsonl"
+    engine = make_engine(str(db_file))
+    Base.metadata.create_all(engine)
+    Session = make_session_factory(engine)
+
+    # Matured window with MATURITY_WINDOW_MINUTES=200, T=10: [now-210min, now-200min)
+    anchor = datetime.now(UTC).replace(tzinfo=None)
+    with Session() as session:
+        session.add(
+            MetricSnapshot(
+                channel_id=2,
+                identity="alice.m1",
+                accepted_shares_total=0,
+                accepted_work_total=0,
+                shares_rejected_total=0,
+                created_at=anchor - timedelta(minutes=212),
+            )
+        )
+        session.add(
+            MetricSnapshot(
+                channel_id=2,
+                identity="alice.m1",
+                accepted_shares_total=9,
+                accepted_work_total=180,
+                shares_rejected_total=0,
+                created_at=anchor - timedelta(minutes=205),
+            )
+        )
+        session.commit()
+
+    monkeypatch.setenv("DB_PATH", str(db_file))
+    monkeypatch.setenv("PAYOUT_AUDIT_LOG_PATH", str(log_file))
+    monkeypatch.setenv("ENABLE_BLOCK_EVENT_REWARDS", "true")
+    monkeypatch.setenv("DEFER_ON_ZERO_MATURED_REWARD", "true")
+    monkeypatch.setenv("BLOCK_REWARD_BATCH_URL", "http://127.0.0.1:8080/v1/az/blocks/rewards")
+    monkeypatch.setenv("TRANSLATOR_BLOCKS_FOUND_URL", "http://127.0.0.1:8080/v1/translator/blocks-found")
+    monkeypatch.setenv("PAYOUT_INTERVAL_MINUTES", "10")
+    monkeypatch.setenv("MATURITY_WINDOW_MINUTES", "200")
+    monkeypatch.setenv("DRY_RUN", "true")
+    monkeypatch.setenv("POSTGRES_PRIMARY_SESSION_ENABLED", "false")
+    monkeypatch.delenv("TRANSLATOR_CHANNELS_URL", raising=False)
+
+    monkeypatch.setattr(
+        "app.main.poll_metrics_once",
+        lambda session, api_url, **kwargs: 0,
+    )
+
+    matured_hashes = ["matured-hash-1", "matured-hash-2"]
+    monkeypatch.setattr(
+        "app.main.fetch_blocks_found_in_window",
+        lambda start, end: [
+            {
+                "found_at": (start + timedelta(minutes=1)).isoformat(),
+                "channel_id": 2,
+                "worker_name": "alice.m1",
+                "blockhash": matured_hashes[0],
+            },
+            {
+                "found_at": (start + timedelta(minutes=2)).isoformat(),
+                "channel_id": 2,
+                "worker_name": "alice.m1",
+                "blockhash": matured_hashes[1],
+            },
+        ],
+    )
+
+    captured_reward_lookup_hashes: list[str] = []
+
+    def _fake_fetch_block_rewards_by_hashes(hashes: list[str]) -> dict[str, int]:
+        captured_reward_lookup_hashes.extend(hashes)
+        return {
+            matured_hashes[0]: 100_000_000,
+            matured_hashes[1]: 50_000_000,
+        }
+
+    monkeypatch.setattr("app.main.fetch_block_rewards_by_hashes", _fake_fetch_block_rewards_by_hashes)
+
+    def _fake_process_payout_events(session, dry_run):
+        _ = dry_run
+        session.commit()
+        return SenderStats(attempted=0, sent=0, failed=0, created_events=0)
+
+    monkeypatch.setattr("app.main.process_payout_events", _fake_process_payout_events)
+
+    client = TestClient(app)
+    response = client.post("/settlements/run")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["settlement"]["status"] == "completed"
+    assert payload["settlement"]["pool_reward_btc"] == "1.50000000"
+    assert payload["block_reward"]["reward_mode"] == "block_events"
+    assert payload["block_reward"]["matured_hash_count"] == 2
+    assert payload["block_reward"]["computed_reward_btc"] == "1.50000000"
+    assert payload["block_reward"]["settlement_reward_btc"] == "1.50000000"
+    assert payload["block_reward"]["reward_entries_complete"] is True
+    assert payload["block_reward"]["missing_reward_hash_count"] == 0
+    assert set(captured_reward_lookup_hashes) == set(matured_hashes)
+    assert len(captured_reward_lookup_hashes) == 2
+
+    with Session() as session:
+        settlement = session.query(Settlement).one()
+        assert settlement.status == "completed"
+
+        rows = (
+            session.query(SnapshotBlock)
+            .filter(SnapshotBlock.blockhash.in_(matured_hashes))
+            .order_by(SnapshotBlock.blockhash.asc())
+            .all()
+        )
+        assert len(rows) == 2
+        by_hash = {row.blockhash: row for row in rows}
+        assert int(by_hash[matured_hashes[0]].reward_sats or 0) == 100_000_000
+        assert int(by_hash[matured_hashes[1]].reward_sats or 0) == 50_000_000
+        assert int(by_hash[matured_hashes[0]].settlement_id or 0) == int(settlement.id)
+        assert int(by_hash[matured_hashes[1]].settlement_id or 0) == int(settlement.id)
 
 
 def test_phase5_hooks_are_invoked_only_when_flags_enabled(monkeypatch, tmp_path) -> None:
